@@ -1,0 +1,8 @@
+[install]
+exact = true
+
+[test]
+# CLAUDE.md §3 coverage: 80% lines; 100% on hook evaluator, lease manager, idempotency-key gen.
+coverage = true
+coverageThreshold = 0.80
+preload = ["./test/setup.ts"]

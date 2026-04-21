@@ -1,0 +1,14 @@
+node_modules/
+.bun/
+.claude/
+dist/
+build/
+coverage/
+playwright-report/
+test-results/
+bun.lockb
+
+# Authored docs — formatted by hand; Prettier breaks intentional line shapes.
+CLAUDE.md
+SPEC.md
+README.md
