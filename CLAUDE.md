@@ -84,7 +84,7 @@ Any gate red → task is not done. No commit, no PR, no "done".
 **Test shape.**
 - One behavior per test.
 - Test observable behavior at a boundary. Never reach into private state.
-- Real Postgres (testcontainers) in integration. Mock only paid external services and external HTTP.
+- Real Postgres in integration. Mock only paid external services and external HTTP.
 - Coverage: 80% lines, 100% on the hook evaluator, per-agent lease manager, and idempotency-key generator.
 
 ## 4. Control flow: simple, explicit, bounded, non-recursive.
