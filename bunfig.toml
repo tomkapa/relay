@@ -6,3 +6,12 @@ exact = true
 coverage = true
 coverageThreshold = 0.80
 preload = ["./test/setup.ts"]
+# Exclude integration-only shells and third-party facades whose coverage can only be
+# exercised through live infrastructure (CLAUDE.md §3 — real Postgres for integration,
+# never mocked). These files are covered by test/integration/* runs against a real DB.
+coveragePathIgnorePatterns = [
+  "**/*.test.ts",
+  "test/**",
+  "src/db/migrate-apply.ts",
+  "src/telemetry/otel.ts",
+]
