@@ -14,6 +14,7 @@ export type HookId = Brand<string, "HookId">;
 export type TenantId = Brand<string, "TenantId">;
 export type UserId = Brand<string, "UserId">;
 export type ChainId = Brand<string, "ChainId">;
+export type WorkItemId = Brand<string, "WorkItemId">;
 
 export type IdParseError =
   | { kind: "empty" }
@@ -58,6 +59,9 @@ export const UserId = {
 };
 export const ChainId = {
   parse: (raw: string): Result<ChainId, IdParseError> => parseUuid<"ChainId">(raw),
+};
+export const WorkItemId = {
+  parse: (raw: string): Result<WorkItemId, IdParseError> => parseUuid<"WorkItemId">(raw),
 };
 
 // Bounded numeric brands from SPEC.

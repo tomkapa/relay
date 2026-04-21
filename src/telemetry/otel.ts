@@ -52,6 +52,9 @@ export const Attr = {
   HookDecision: "relay.hook.decision",
   ToolName: "relay.tool.name",
   TriggerKind: "relay.trigger.kind",
+  QueueOp: "relay.queue.op",
+  QueueBatch: "relay.queue.batch",
+  QueuePicked: "relay.queue.picked",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 

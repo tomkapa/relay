@@ -35,6 +35,7 @@ function requireSql(): Sql {
 
 async function resetDb(s: Sql): Promise<void> {
   await s.unsafe(`
+    DROP TABLE IF EXISTS work_queue CASCADE;
     DROP TABLE IF EXISTS tasks CASCADE;
     DROP TABLE IF EXISTS sessions CASCADE;
     DROP TABLE IF EXISTS agents CASCADE;
@@ -60,13 +61,13 @@ const describeOrSkip = DB_URL ? describe : describe.skip;
 
 describeOrSkip("migrate (integration)", () => {
   test(
-    "applies 0001_init: extension, tables, indexes, checks",
+    "applies shipped migrations: extension, tables, indexes, checks",
     async () => {
       const sql = requireSql();
       const result = await migrate(sql, MIGRATIONS_DIR);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value.applied).toEqual([1]);
+      expect(result.value.applied).toEqual([1, 2]);
       expect(result.value.skipped).toEqual([]);
 
       const extRows = await sql<{ installed: boolean }[]>`
@@ -123,7 +124,7 @@ describeOrSkip("migrate (integration)", () => {
       expect(second.ok).toBe(true);
       if (!second.ok) return;
       expect(second.value.applied).toEqual([]);
-      expect(second.value.skipped).toEqual([1]);
+      expect(second.value.skipped).toEqual([1, 2]);
     },
     HOOK_TIMEOUT_MS,
   );
