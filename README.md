@@ -20,10 +20,10 @@ bun run check          # lint + fmt:check + typecheck + unit tests
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every PR against `main`:
+`.github/workflows/ci.yml` runs on every PR against `main` in two parallel jobs:
 
-- **`checks`** — `bun run lint`, `bun run fmt:check`, `bun run typecheck`, `bun test` (unit + coverage threshold).
-- **`integration`** — brings up `pgvector/pgvector:pg16` as a GitHub Actions service container, sets `INTEGRATION_DATABASE_URL`, and runs `bun test test/integration`.
+- **`static`** — `bun run lint`, `bun run fmt:check`, `bun run typecheck`. Fast feedback, no DB.
+- **`test`** — spins up `pgvector/pgvector:pg16` as a service container, sets `INTEGRATION_DATABASE_URL`, and runs the full `bun test` suite (unit + integration, single coverage aggregation).
 
 Bun is pinned via `BUN_VERSION` in the workflow. Bump deliberately — never float to `latest`.
 
