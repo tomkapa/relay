@@ -78,7 +78,15 @@ export async function dequeue(
         RETURNING id, tenant_id, kind, payload_ref, scheduled_at, attempts
       `;
 
-      const items = rows.map(rowToItem);
+      // UPDATE ... RETURNING does not preserve the inner ORDER BY — Postgres returns
+      // updated rows in arbitrary physical order. The subquery picks the correct N rows
+      // (earliest ready); we restore scheduled_at ordering here so callers see the
+      // batch in the order a worker should process it.
+      const items = rows
+        .map(rowToItem)
+        .sort(
+          (a, b) => a.scheduledAt.getTime() - b.scheduledAt.getTime() || a.id.localeCompare(b.id),
+        );
       span.setAttribute(Attr.QueuePicked, items.length);
       return ok(items);
     },
