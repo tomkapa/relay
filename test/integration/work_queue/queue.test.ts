@@ -5,36 +5,21 @@
 // Consumes INTEGRATION_DATABASE_URL (same contract as test/integration/db/migrate.test.ts).
 // Skipped when the env var is unset so `bun test` stays green on a machine without Docker.
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import postgres, { type Sql } from "postgres";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { assert } from "../../../src/core/assert.ts";
 import { TenantId, WorkItemId } from "../../../src/ids.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
 import { complete, dequeue, enqueue, release } from "../../../src/work_queue/queue-ops.ts";
 import { WorkerId } from "../../../src/work_queue/queue.ts";
-
-const MIGRATIONS_DIR = path.resolve(import.meta.dir, "../../../src/db/migrations");
-const DB_URL = process.env["INTEGRATION_DATABASE_URL"];
-const HOOK_TIMEOUT_MS = 30_000;
+import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
 
 let sqlRef: Sql | undefined;
 
 function requireSql(): Sql {
   assert(sqlRef !== undefined, "integration test: sql initialized by beforeAll");
   return sqlRef;
-}
-
-async function resetDb(s: Sql): Promise<void> {
-  await s.unsafe(`
-    DROP TABLE IF EXISTS work_queue CASCADE;
-    DROP TABLE IF EXISTS tasks CASCADE;
-    DROP TABLE IF EXISTS sessions CASCADE;
-    DROP TABLE IF EXISTS agents CASCADE;
-    DROP TABLE IF EXISTS _migrations CASCADE;
-    DROP EXTENSION IF EXISTS vector CASCADE;
-  `);
 }
 
 function tenant(): TenantId {
@@ -69,8 +54,6 @@ beforeEach(async () => {
   const sql = requireSql();
   await sql`TRUNCATE TABLE work_queue`;
 });
-
-const describeOrSkip = DB_URL ? describe : describe.skip;
 
 describeOrSkip("work_queue (integration)", () => {
   test(
