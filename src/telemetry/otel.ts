@@ -28,6 +28,7 @@ export const logger: Logger = logs.getLogger(INSTRUMENTATION_NAME, INSTRUMENTATI
 export const SpanName = {
   AgentCreate: "agent.create",
   SessionTurn: "session.turn",
+  SessionCreate: "session.create",
   HookEvaluate: "hook.evaluate",
   ToolCall: "tool.call",
   ModelCall: "model.call",
@@ -35,6 +36,8 @@ export const SpanName = {
   MemoryWrite: "memory.write",
   MemoryConsolidate: "memory.consolidate",
   ConnectorDispatch: "connector.dispatch",
+  TriggerIngest: "trigger.ingest",
+  TriggerSynthesize: "trigger.synthesize",
   WorkerPick: "worker.pick",
   WorkerTick: "worker.tick",
   WorkerHandle: "worker.handle",

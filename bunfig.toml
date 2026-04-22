@@ -17,6 +17,14 @@ coveragePathIgnorePatterns = [
   "src/work_queue/queue-ops.ts",
   # Agent creation domain function — DB shell, covered by test/integration/agent/create.test.ts.
   "src/agent/create.ts",
+  # Agent load — DB shell, covered by test/integration/trigger/handlers.test.ts.
+  "src/agent/load.ts",
+  # Session creation — DB shell, covered by test/integration/trigger/handlers.test.ts.
+  "src/session/create.ts",
+  # Trigger envelope DB ops — covered by test/integration/trigger/handlers.test.ts.
+  "src/trigger/envelope-ops.ts",
+  # Trigger handlers — DB-dependent shell, covered by test/integration/trigger/handlers.test.ts.
+  "src/trigger/handlers.ts",
   # HTTP layer — exercised end-to-end by test/integration/http/agents.test.ts with real Postgres.
   "src/http/app.ts",
   "src/http/routes/agents.ts",

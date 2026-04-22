@@ -12,6 +12,7 @@ import {
   TenantId,
   TurnId,
   UserId,
+  mintId,
 } from "../../../src/ids.ts";
 
 const VALID_V4 = "550e8400-e29b-41d4-a716-446655440000";
@@ -122,5 +123,19 @@ describe("Importance.parse", () => {
   test("rejects NaN and Infinity", () => {
     expect(Importance.parse(Number.NaN).ok).toBe(false);
     expect(Importance.parse(Number.POSITIVE_INFINITY).ok).toBe(false);
+  });
+});
+
+describe("mintId", () => {
+  test("returns a valid branded id using the provided parser", () => {
+    const id = mintId(AgentId.parse, "test");
+    const re = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    expect(re.test(id as string)).toBe(true);
+  });
+
+  test("returns different values on successive calls", () => {
+    const a = mintId(SessionId.parse, "test") as string;
+    const b = mintId(SessionId.parse, "test") as string;
+    expect(a).not.toBe(b);
   });
 });

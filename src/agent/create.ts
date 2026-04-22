@@ -2,28 +2,17 @@
 // multi-statement inserts (seed memory, initial tasks) land atomically.
 // See SPEC §Agent creation and CLAUDE.md §3, §6, §10.
 
-import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import { assert } from "../core/assert.ts";
 import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import { AgentId, type AgentId as AgentIdBrand } from "../ids.ts";
+import { AgentId, mintId, type AgentId as AgentIdBrand } from "../ids.ts";
+import type { DbJson } from "../db/utils.ts";
 import { Attr, SpanName, withSpan } from "../telemetry/otel.ts";
 import { MAX_SYSTEM_PROMPT_LEN } from "./limits.ts";
 import { type AgentParseError, type AgentCreateSpec } from "./parse.ts";
 
 export type AgentCreateError = AgentParseError | { kind: "db_conflict"; detail: string };
-
-// Minimal JSON-safe type accepted by postgres.js sql.json(). ToolDescriptor uses an
-// `unknown` index signature that TypeScript cannot prove is JSON-safe, so we go
-// through `unknown` once per call site to make the cross-type cast explicit.
-type DbJson =
-  | null
-  | string
-  | number
-  | boolean
-  | readonly DbJson[]
-  | { readonly [k: string]: DbJson };
 
 export async function createAgent(
   sql: Sql,
@@ -31,10 +20,7 @@ export async function createAgent(
   spec: AgentCreateSpec,
 ): Promise<Result<{ id: AgentIdBrand; createdAt: Date }, AgentCreateError>> {
   // Mint the ID before the span so the span attribute can include it immediately.
-  const idRaw = randomUUID();
-  const parsedId = AgentId.parse(idRaw);
-  assert(parsedId.ok, "createAgent: randomUUID produced invalid id", { raw: idRaw });
-  const id = parsedId.value;
+  const id = mintId(AgentId.parse, "createAgent");
 
   assert(spec.systemPrompt.length > 0, "createAgent: spec invariant: systemPrompt non-empty", {
     length: spec.systemPrompt.length,

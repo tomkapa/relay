@@ -9,6 +9,7 @@ export const describeOrSkip = DB_URL ? describe : describe.skip;
 
 export async function resetDb(s: Sql): Promise<void> {
   await s.unsafe(`
+    DROP TABLE IF EXISTS trigger_envelopes CASCADE;
     DROP TABLE IF EXISTS work_queue CASCADE;
     DROP TABLE IF EXISTS tasks CASCADE;
     DROP TABLE IF EXISTS sessions CASCADE;
