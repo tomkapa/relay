@@ -112,6 +112,29 @@ export async function complete(
   return ok(undefined);
 }
 
+// Extends the lease deadline for an item the caller still holds. Returns lease_not_held
+// if the caller no longer owns the item (stolen by another worker after a missed renewal).
+export async function renewLease(
+  sql: Sql,
+  id: WorkItemId,
+  workerId: WorkerId,
+  nowMs: number,
+  leaseMs: number = DEFAULT_LEASE_MS,
+): Promise<Result<void, WorkQueueError>> {
+  assert(leaseMs > 0, "renewLease: leaseMs must be positive", { leaseMs });
+  const until = new Date(nowMs + leaseMs);
+  const rows = await sql<{ id: string }[]>`
+    UPDATE work_queue
+    SET leased_until = ${until}, updated_at = now()
+    WHERE id = ${id}
+      AND leased_by = ${workerId}
+      AND completed_at IS NULL
+    RETURNING id
+  `;
+  if (rows.length === 0) return err({ kind: "lease_not_held", id });
+  return ok(undefined);
+}
+
 // Drops the lease without completing. The next dequeue re-leases the row to whoever
 // picks it up — for transient failures where waiting out the lease TTL would waste time.
 export async function release(
