@@ -95,11 +95,6 @@ function mapSessionError(e: SessionCreateError): HandlerError {
       return { kind: "handler_failed", reason: `agent not found: ${e.agentId as string}` };
     case "tenant_mismatch":
       return { kind: "handler_failed", reason: "tenant mismatch" };
-    case "transcript_too_large":
-      return {
-        kind: "handler_failed",
-        reason: `transcript too large: ${e.bytes.toString()} > ${e.max.toString()}`,
-      };
     default:
       throw unreachable(e);
   }

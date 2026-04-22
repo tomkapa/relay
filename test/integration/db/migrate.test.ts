@@ -17,9 +17,11 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres, { type Sql } from "postgres";
 import { assert } from "../../../src/core/assert.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
+import { loadMigrations } from "../../../src/db/migrate.ts";
 import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
 
 let sqlRef: Sql | undefined;
+let allVersions: readonly number[] = [];
 
 function requireSql(): Sql {
   assert(sqlRef !== undefined, "integration test: sql initialized by beforeAll");
@@ -33,6 +35,12 @@ beforeAll(async () => {
   await s`SELECT 1`;
   await resetDb(s);
   sqlRef = s;
+
+  // Load after DB setup so the postgres client is created at the same time as before,
+  // avoiding a timing shift that can race with other concurrently running test files.
+  const loaded = await loadMigrations(MIGRATIONS_DIR);
+  assert(loaded.ok, "beforeAll: failed to load migrations");
+  allVersions = loaded.value.map((m) => m.version);
 }, HOOK_TIMEOUT_MS);
 
 afterAll(async () => {
@@ -47,7 +55,7 @@ describeOrSkip("migrate (integration)", () => {
       const result = await migrate(sql, MIGRATIONS_DIR);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value.applied).toEqual([1, 2, 3]);
+      expect(result.value.applied).toEqual(allVersions);
       expect(result.value.skipped).toEqual([]);
 
       const extRows = await sql<{ installed: boolean }[]>`
@@ -83,6 +91,23 @@ describeOrSkip("migrate (integration)", () => {
       `;
       expect(envelopeTable[0]?.exists).toBe(true);
 
+      const turnsTable = await sql<{ exists: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name = 'turns'
+        ) AS exists
+      `;
+      expect(turnsTable[0]?.exists).toBe(true);
+
+      const transcriptCol = await sql<{ exists: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'sessions'
+            AND column_name = 'turn_transcript'
+        ) AS exists
+      `;
+      expect(transcriptCol[0]?.exists).toBe(false);
+
       // depth CHECK rejects out-of-range.
       const agentRows = await sql<{ id: string }[]>`
         INSERT INTO agents (id, tenant_id, system_prompt)
@@ -113,7 +138,7 @@ describeOrSkip("migrate (integration)", () => {
       expect(second.ok).toBe(true);
       if (!second.ok) return;
       expect(second.value.applied).toEqual([]);
-      expect(second.value.skipped).toEqual([1, 2, 3]);
+      expect(second.value.skipped).toEqual(allVersions);
     },
     HOOK_TIMEOUT_MS,
   );

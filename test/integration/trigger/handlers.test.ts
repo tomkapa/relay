@@ -66,14 +66,13 @@ type SessionRow = {
   tenant_id: string;
   chain_id: string;
   depth: number;
-  turn_transcript: { role: string; content: string; sender?: unknown }[];
   source_work_item_id: string;
   originating_trigger: Record<string, unknown>;
 };
 
 async function getSession(sql: Sql, workItemId: string): Promise<SessionRow | undefined> {
   const rows = await sql<SessionRow[]>`
-    SELECT id, agent_id, tenant_id, chain_id, depth, turn_transcript, source_work_item_id, originating_trigger
+    SELECT id, agent_id, tenant_id, chain_id, depth, source_work_item_id, originating_trigger
     FROM sessions
     WHERE source_work_item_id = ${workItemId}
   `;
@@ -148,12 +147,6 @@ describeOrSkip("session_start — message handler", () => {
       expect(session?.depth).toBe(0);
       expect(session?.chain_id).toBeTruthy();
       expect(session?.agent_id).toBe(agentId as string);
-
-      const transcript = session?.turn_transcript;
-      expect(transcript).toHaveLength(2);
-      expect(transcript?.[0]?.role).toBe("system");
-      expect(transcript?.[1]?.role).toBe("user");
-      expect(transcript?.[1]?.sender).toBeDefined();
     },
     HOOK_TIMEOUT_MS,
   );
@@ -200,8 +193,8 @@ describeOrSkip("session_start — message handler", () => {
       expect(result.ok).toBe(true);
 
       const session = await getSession(sql, workItemId);
-      const transcript = session?.turn_transcript;
-      expect(transcript?.[1]?.content).toContain("github");
+      expect(session).toBeDefined();
+      expect(session?.agent_id).toBe(agentId as string);
     },
     HOOK_TIMEOUT_MS,
   );
@@ -244,9 +237,6 @@ describeOrSkip("task_fire handler", () => {
       const session = await getSession(sql, workItemId);
       expect(session).toBeDefined();
       expect(session?.originating_trigger["kind"]).toBe("task_fire");
-
-      const transcript = session?.turn_transcript;
-      expect(transcript?.[1]?.content).toContain("Run weekly digest");
     },
     HOOK_TIMEOUT_MS,
   );

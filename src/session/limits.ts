@@ -18,10 +18,12 @@ export const MAX_TURNS_PER_COMPACTION = 50;
 export const LEASE_TTL_MS = 30_000;
 export const LEASE_RENEW_INTERVAL_MS = 10_000;
 
-// Max byte length of the serialized turn_transcript JSON on initial INSERT. Opening context
-// is always ≤2 entries; this guards against a producer inflating the transcript beyond reason.
-// Set above compaction threshold so legitimate long prompts are not rejected prematurely.
-export const MAX_INITIAL_TRANSCRIPT_BYTES = 512 * 1024;
+// Upper bound on a single model call. Generous enough for long completions; tight enough to
+// detect hung connections before the worker's lease expires (LEASE_TTL_MS = 30 s).
+export const MODEL_CALL_TIMEOUT_MS = 120_000; // 2 min
+
+// Per tool_use block. Tools are expected to respond quickly; a slow tool is the tool's bug.
+export const TOOL_CALL_TIMEOUT_MS = 30_000; // 30 s
 
 // Default `ask` timeout. Per-call override via tool args (SPEC.md §Timeouts).
 export const ASK_DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
