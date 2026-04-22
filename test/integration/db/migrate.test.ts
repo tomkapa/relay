@@ -30,15 +30,17 @@ function requireSql(): Sql {
 
 beforeAll(async () => {
   if (!DB_URL) return;
-  const loaded = await loadMigrations(MIGRATIONS_DIR);
-  assert(loaded.ok, "beforeAll: failed to load migrations");
-  allVersions = loaded.value.map((m) => m.version);
-
   const s = postgres(DB_URL, { max: 4, idle_timeout: 2 });
   // Fail fast if the URL is wrong rather than letting the first test hang.
   await s`SELECT 1`;
   await resetDb(s);
   sqlRef = s;
+
+  // Load after DB setup so the postgres client is created at the same time as before,
+  // avoiding a timing shift that can race with other concurrently running test files.
+  const loaded = await loadMigrations(MIGRATIONS_DIR);
+  assert(loaded.ok, "beforeAll: failed to load migrations");
+  allVersions = loaded.value.map((m) => m.version);
 }, HOOK_TIMEOUT_MS);
 
 afterAll(async () => {
