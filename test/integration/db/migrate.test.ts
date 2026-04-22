@@ -47,7 +47,7 @@ describeOrSkip("migrate (integration)", () => {
       const result = await migrate(sql, MIGRATIONS_DIR);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value.applied).toEqual([1, 2, 3]);
+      expect(result.value.applied).toEqual([1, 2, 3, 4]);
       expect(result.value.skipped).toEqual([]);
 
       const extRows = await sql<{ installed: boolean }[]>`
@@ -83,6 +83,23 @@ describeOrSkip("migrate (integration)", () => {
       `;
       expect(envelopeTable[0]?.exists).toBe(true);
 
+      const turnsTable = await sql<{ exists: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name = 'turns'
+        ) AS exists
+      `;
+      expect(turnsTable[0]?.exists).toBe(true);
+
+      const transcriptCol = await sql<{ exists: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'sessions'
+            AND column_name = 'turn_transcript'
+        ) AS exists
+      `;
+      expect(transcriptCol[0]?.exists).toBe(false);
+
       // depth CHECK rejects out-of-range.
       const agentRows = await sql<{ id: string }[]>`
         INSERT INTO agents (id, tenant_id, system_prompt)
@@ -113,7 +130,7 @@ describeOrSkip("migrate (integration)", () => {
       expect(second.ok).toBe(true);
       if (!second.ok) return;
       expect(second.value.applied).toEqual([]);
-      expect(second.value.skipped).toEqual([1, 2, 3]);
+      expect(second.value.skipped).toEqual([1, 2, 3, 4]);
     },
     HOOK_TIMEOUT_MS,
   );
