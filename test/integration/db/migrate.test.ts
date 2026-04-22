@@ -47,7 +47,7 @@ describeOrSkip("migrate (integration)", () => {
       const result = await migrate(sql, MIGRATIONS_DIR);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      expect(result.value.applied).toEqual([1, 2]);
+      expect(result.value.applied).toEqual([1, 2, 3]);
       expect(result.value.skipped).toEqual([]);
 
       const extRows = await sql<{ installed: boolean }[]>`
@@ -73,6 +73,15 @@ describeOrSkip("migrate (integration)", () => {
       const names = new Set(idx.map((r) => r.indexname));
       expect(names.has("sessions_agent_closed_idx")).toBe(true);
       expect(names.has("sessions_chain_id_idx")).toBe(true);
+      expect(names.has("sessions_source_work_item_idx")).toBe(true);
+
+      const envelopeTable = await sql<{ exists: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name = 'trigger_envelopes'
+        ) AS exists
+      `;
+      expect(envelopeTable[0]?.exists).toBe(true);
 
       // depth CHECK rejects out-of-range.
       const agentRows = await sql<{ id: string }[]>`
@@ -104,7 +113,7 @@ describeOrSkip("migrate (integration)", () => {
       expect(second.ok).toBe(true);
       if (!second.ok) return;
       expect(second.value.applied).toEqual([]);
-      expect(second.value.skipped).toEqual([1, 2]);
+      expect(second.value.skipped).toEqual([1, 2, 3]);
     },
     HOOK_TIMEOUT_MS,
   );
