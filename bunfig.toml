@@ -15,4 +15,10 @@ coveragePathIgnorePatterns = [
   "src/db/migrate-apply.ts",
   "src/telemetry/otel.ts",
   "src/work_queue/queue-ops.ts",
+  # Agent creation domain function — DB shell, covered by test/integration/agent/create.test.ts.
+  "src/agent/create.ts",
+  # HTTP layer — exercised end-to-end by test/integration/http/agents.test.ts with real Postgres.
+  "src/http/app.ts",
+  "src/http/routes/agents.ts",
+  "src/http/server.ts",
 ]

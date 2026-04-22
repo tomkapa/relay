@@ -26,6 +26,7 @@ export const logger: Logger = logs.getLogger(INSTRUMENTATION_NAME, INSTRUMENTATI
 // Stable, low-cardinality span names. Dynamic values go on attributes (CLAUDE.md §2).
 // Add new names here; never inline string literals at call sites.
 export const SpanName = {
+  AgentCreate: "agent.create",
   SessionTurn: "session.turn",
   HookEvaluate: "hook.evaluate",
   ToolCall: "tool.call",

@@ -13,35 +13,17 @@
 // happy path for the runner's file-parsing logic (test/unit/db/migrate.test.ts); these
 // tests only add value when a real Postgres is present.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres, { type Sql } from "postgres";
-import path from "node:path";
 import { assert } from "../../../src/core/assert.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
-
-const MIGRATIONS_DIR = path.resolve(import.meta.dir, "../../../src/db/migrations");
-const DB_URL = process.env["INTEGRATION_DATABASE_URL"];
-
-// Per-hook budget. Real Postgres is local and fast; anything that takes longer than this
-// is a bug in the runner or the environment.
-const HOOK_TIMEOUT_MS = 30_000;
+import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
 
 let sqlRef: Sql | undefined;
 
 function requireSql(): Sql {
   assert(sqlRef !== undefined, "integration test: sql initialized by beforeAll");
   return sqlRef;
-}
-
-async function resetDb(s: Sql): Promise<void> {
-  await s.unsafe(`
-    DROP TABLE IF EXISTS work_queue CASCADE;
-    DROP TABLE IF EXISTS tasks CASCADE;
-    DROP TABLE IF EXISTS sessions CASCADE;
-    DROP TABLE IF EXISTS agents CASCADE;
-    DROP TABLE IF EXISTS _migrations CASCADE;
-    DROP EXTENSION IF EXISTS vector CASCADE;
-  `);
 }
 
 beforeAll(async () => {
@@ -56,8 +38,6 @@ beforeAll(async () => {
 afterAll(async () => {
   if (sqlRef !== undefined) await sqlRef.end({ timeout: 5 });
 }, 10_000);
-
-const describeOrSkip = DB_URL ? describe : describe.skip;
 
 describeOrSkip("migrate (integration)", () => {
   test(
