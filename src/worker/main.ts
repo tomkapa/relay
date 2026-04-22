@@ -6,9 +6,9 @@ import { hostname } from "node:os";
 import { assert } from "../core/assert.ts";
 import { realClock } from "../core/clock.ts";
 import { connect } from "../db/client.ts";
+import { triggerHandlers } from "../trigger/handlers.ts";
 import { MAX_WORKER_ID_LEN } from "../work_queue/limits.ts";
 import { WorkerId } from "../work_queue/queue.ts";
-import { stubDispatcher } from "./dispatcher.ts";
 import { DRAIN_TIMEOUT_MS } from "./limits.ts";
 import { makeWorkerQueue, runWorker } from "./worker.ts";
 
@@ -43,7 +43,7 @@ await runWorker(
     queue,
     workerId,
     clock: realClock,
-    dispatcher: stubDispatcher,
+    dispatcher: triggerHandlers({ sql, clock: realClock }),
   },
   ctrl.signal,
 );

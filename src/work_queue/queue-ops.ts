@@ -2,11 +2,10 @@
 // `queue.ts`; this file is the postgres.js shell. Covered by integration tests per
 // CLAUDE.md §3 — the FOR UPDATE SKIP LOCKED semantics cannot be tested against a mock.
 
-import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import { assert } from "../core/assert.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import { WorkItemId } from "../ids.ts";
+import { WorkItemId, mintId } from "../ids.ts";
 import { Attr, SpanName, withSpan } from "../telemetry/otel.ts";
 import { DEFAULT_LEASE_MS } from "./limits.ts";
 import {
@@ -28,9 +27,7 @@ export async function enqueue(
   const v = validateEnqueue(params);
   if (!v.ok) return v;
 
-  const parsed = WorkItemId.parse(randomUUID());
-  assert(parsed.ok, "enqueue: randomUUID produced an invalid id", { error: parsed });
-  const id = parsed.value;
+  const id = mintId(WorkItemId.parse, "enqueue");
 
   await sql`
     INSERT INTO work_queue (id, tenant_id, kind, payload_ref, scheduled_at)

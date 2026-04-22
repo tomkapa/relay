@@ -2,6 +2,8 @@
 // Parsers live at the system boundary (zod → these constructors). No `as` inside the core.
 // See CLAUDE.md §1 and SPEC.md §Data Model.
 
+import { randomUUID } from "node:crypto";
+import { assert } from "./core/assert.ts";
 import type { Brand } from "./core/brand.ts";
 import { err, ok, type Result } from "./core/result.ts";
 
@@ -15,6 +17,7 @@ export type TenantId = Brand<string, "TenantId">;
 export type UserId = Brand<string, "UserId">;
 export type ChainId = Brand<string, "ChainId">;
 export type WorkItemId = Brand<string, "WorkItemId">;
+export type EnvelopeId = Brand<string, "EnvelopeId">;
 
 export type IdParseError =
   | { kind: "empty" }
@@ -63,6 +66,21 @@ export const ChainId = {
 export const WorkItemId = {
   parse: (raw: string): Result<WorkItemId, IdParseError> => parseUuid<"WorkItemId">(raw),
 };
+export const EnvelopeId = {
+  parse: (raw: string): Result<EnvelopeId, IdParseError> => parseUuid<"EnvelopeId">(raw),
+};
+
+// Mint a new UUID-based branded id. Asserts that randomUUID() produces a valid value,
+// which it always does — the assert guards against theoretical platform bugs.
+export function mintId<B extends string>(
+  parser: (raw: string) => Result<Brand<string, B>, IdParseError>,
+  context: string,
+): Brand<string, B> {
+  const raw = randomUUID();
+  const result = parser(raw);
+  assert(result.ok, `${context}: randomUUID produced invalid id`, { raw });
+  return result.value;
+}
 
 // Bounded numeric brands from SPEC.
 export type Depth = Brand<number, "Depth">;
