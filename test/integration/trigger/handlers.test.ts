@@ -4,13 +4,19 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import postgres, { type Sql } from "postgres";
-import type { AgentId } from "../../../src/ids.ts";
+import type { AgentId, SessionId } from "../../../src/ids.ts";
 import { assert } from "../../../src/core/assert.ts";
 import { FakeClock } from "../../../src/core/clock.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
-import { AgentId as AgentIdParser, TenantId, WorkItemId } from "../../../src/ids.ts";
+import {
+  AgentId as AgentIdParser,
+  SessionId as SessionIdParser,
+  TenantId,
+  WorkItemId,
+} from "../../../src/ids.ts";
 import { enqueue } from "../../../src/work_queue/queue-ops.ts";
 import { writeEnvelope } from "../../../src/trigger/envelope-ops.ts";
+import { writeInboundMessage } from "../../../src/trigger/inbound/inbound-ops.ts";
 import { triggerHandlers } from "../../../src/trigger/handlers.ts";
 import type { HandlerDeps } from "../../../src/trigger/handlers.ts";
 import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
@@ -79,6 +85,30 @@ async function getSession(sql: Sql, workItemId: string): Promise<SessionRow | un
   return rows[0];
 }
 
+async function insertOpenSession(
+  sql: Sql,
+  tenantId: ReturnType<typeof tenant>,
+  agentId: AgentId,
+): Promise<SessionId> {
+  const sessionIdStr = randomUUID();
+  const chainId = randomUUID();
+  const trigger = sql.json({ kind: "test" });
+  await sql`
+    INSERT INTO sessions (
+      id, agent_id, tenant_id, originating_trigger,
+      parent_session_id, chain_id, depth
+    )
+    VALUES (
+      ${sessionIdStr}, ${agentId}, ${tenantId},
+      ${trigger},
+      NULL, ${chainId}, 0
+    )
+  `;
+  const r = SessionIdParser.parse(sessionIdStr);
+  assert(r.ok, "fixture: randomUUID produced invalid SessionId");
+  return r.value;
+}
+
 beforeAll(async () => {
   if (!DB_URL) return;
   const s = postgres(DB_URL, { max: 4, idle_timeout: 2 });
@@ -96,7 +126,9 @@ afterAll(async () => {
 beforeEach(async () => {
   if (!DB_URL) return;
   const s = requireSql();
-  await s.unsafe(`TRUNCATE TABLE trigger_envelopes, work_queue, sessions, tasks, agents CASCADE`);
+  await s.unsafe(
+    `TRUNCATE TABLE inbound_messages, trigger_envelopes, work_queue, sessions, tasks, agents CASCADE`,
+  );
 });
 
 describeOrSkip("session_start — message handler", () => {
@@ -461,22 +493,35 @@ describeOrSkip("oversized envelope", () => {
   );
 });
 
-describeOrSkip("inbound_message stub", () => {
+describeOrSkip("inbound_message handler — happy path", () => {
   test(
-    "returns handler_failed with 'not implemented: inbound_message (owned by RELAY-47)'",
+    "returns ok and emits ready signal for a valid inbound_message work item",
     async () => {
       const sql = requireSql();
-      const clock = new FakeClock(0);
+      const clock = new FakeClock(1_700_000_000_000);
       const tenantId = tenant();
+      const agentId = await insertAgent(sql, tenantId);
+      const sessionId = await insertOpenSession(sql, tenantId, agentId);
+
       const widResult = WorkItemId.parse(randomUUID());
       assert(widResult.ok, "fixture: WorkItemId.parse failed");
+
+      const inboundResult = await writeInboundMessage(sql, {
+        tenantId,
+        targetSessionId: sessionId,
+        sender: { type: "human", id: "user-1", displayName: "Alice" },
+        content: "Hello from the test",
+        receivedAt: new Date(clock.now()),
+        sourceWorkItemId: widResult.value,
+      });
+      assert(inboundResult.ok, "fixture: writeInboundMessage failed");
 
       const workItem: WorkItem = {
         id: widResult.value,
         tenantId,
         kind: "inbound_message",
-        payloadRef: "irrelevant",
-        scheduledAt: new Date(0),
+        payloadRef: inboundResult.value,
+        scheduledAt: new Date(clock.now()),
         attempts: 1,
       };
 
@@ -484,11 +529,317 @@ describeOrSkip("inbound_message stub", () => {
         workItem,
         new AbortController().signal,
       );
+      expect(result.ok).toBe(true);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  for (const senderType of ["agent", "system"] as const) {
+    test(
+      `returns ok for sender_type ${senderType}`,
+      async () => {
+        const sql = requireSql();
+        const clock = new FakeClock(1_700_000_000_000);
+        const tenantId = tenant();
+        const agentId = await insertAgent(sql, tenantId);
+        const sessionId = await insertOpenSession(sql, tenantId, agentId);
+        const widResult = WorkItemId.parse(randomUUID());
+        assert(widResult.ok, "fixture: WorkItemId.parse failed");
+        const inboundResult = await writeInboundMessage(sql, {
+          tenantId,
+          targetSessionId: sessionId,
+          sender: { type: senderType, id: "sender-1" },
+          content: `${senderType} says hi`,
+          receivedAt: new Date(clock.now()),
+          sourceWorkItemId: widResult.value,
+        });
+        assert(inboundResult.ok, "fixture: writeInboundMessage failed");
+        const workItem: WorkItem = {
+          id: widResult.value,
+          tenantId,
+          kind: "inbound_message",
+          payloadRef: inboundResult.value,
+          scheduledAt: new Date(clock.now()),
+          attempts: 1,
+        };
+        const result = await triggerHandlers({ sql, clock }).inbound_message(
+          workItem,
+          new AbortController().signal,
+        );
+        expect(result.ok).toBe(true);
+      },
+      HOOK_TIMEOUT_MS,
+    );
+  }
+});
+
+describeOrSkip("inbound_message handler — idempotency", () => {
+  test(
+    "second writeInboundMessage with same sourceWorkItemId returns the existing id",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_700_000_000_000);
+      const tenantId = tenant();
+      const agentId = await insertAgent(sql, tenantId);
+      const sessionId = await insertOpenSession(sql, tenantId, agentId);
+      const widResult = WorkItemId.parse(randomUUID());
+      assert(widResult.ok, "fixture: WorkItemId.parse failed");
+
+      const spec = {
+        tenantId,
+        targetSessionId: sessionId,
+        sender: { type: "human" as const, id: "user-1" },
+        content: "Hello",
+        receivedAt: new Date(clock.now()),
+        sourceWorkItemId: widResult.value,
+      };
+
+      const r1 = await writeInboundMessage(sql, spec);
+      assert(r1.ok, "fixture: first writeInboundMessage failed");
+      const r2 = await writeInboundMessage(sql, spec);
+      assert(r2.ok, "fixture: second writeInboundMessage failed");
+      expect(r1.value).toBe(r2.value);
+
+      const count = await sql<{ c: string }[]>`
+        SELECT count(*) AS c FROM inbound_messages WHERE source_work_item_id = ${widResult.value}
+      `;
+      expect(Number(count[0]?.c)).toBe(1);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+});
+
+describeOrSkip("inbound_message handler — error cases", () => {
+  test(
+    "invalid payload_ref returns handler_failed",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(0);
+      const tenantId = tenant();
+      const widResult = WorkItemId.parse(randomUUID());
+      assert(widResult.ok, "fixture: WorkItemId.parse failed");
+      const workItem: WorkItem = {
+        id: widResult.value,
+        tenantId,
+        kind: "inbound_message",
+        payloadRef: "not-a-uuid",
+        scheduledAt: new Date(0),
+        attempts: 1,
+      };
+      const result = await triggerHandlers({ sql, clock }).inbound_message(
+        workItem,
+        new AbortController().signal,
+      );
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error.kind).toBe("handler_failed");
-      if (result.error.kind !== "handler_failed") return;
-      expect(result.error.reason).toBe("not implemented: inbound_message (owned by RELAY-47)");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "inbound row not found returns handler_failed",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(0);
+      const tenantId = tenant();
+      const widResult = WorkItemId.parse(randomUUID());
+      assert(widResult.ok, "fixture: WorkItemId.parse failed");
+      const workItem: WorkItem = {
+        id: widResult.value,
+        tenantId,
+        kind: "inbound_message",
+        payloadRef: randomUUID(),
+        scheduledAt: new Date(0),
+        attempts: 1,
+      };
+      const result = await triggerHandlers({ sql, clock }).inbound_message(
+        workItem,
+        new AbortController().signal,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("handler_failed");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "inbound row tenant_id != work item tenant_id returns handler_failed without delivery",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_700_000_000_000);
+      const tenantA = tenant();
+      const tenantB = tenant();
+      const agentId = await insertAgent(sql, tenantA);
+      const sessionId = await insertOpenSession(sql, tenantA, agentId);
+      const widResult = WorkItemId.parse(randomUUID());
+      assert(widResult.ok, "fixture: WorkItemId.parse failed");
+
+      // Write inbound under tenantA, but dispatch work item under tenantB
+      const inboundResult = await writeInboundMessage(sql, {
+        tenantId: tenantA,
+        targetSessionId: sessionId,
+        sender: { type: "human", id: "u" },
+        content: "Mismatch",
+        receivedAt: new Date(clock.now()),
+        sourceWorkItemId: widResult.value,
+      });
+      assert(inboundResult.ok, "fixture: writeInboundMessage failed");
+
+      const workItem: WorkItem = {
+        id: widResult.value,
+        tenantId: tenantB,
+        kind: "inbound_message",
+        payloadRef: inboundResult.value,
+        scheduledAt: new Date(clock.now()),
+        attempts: 1,
+      };
+      const result = await triggerHandlers({ sql, clock }).inbound_message(
+        workItem,
+        new AbortController().signal,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("handler_failed");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "closed target session returns handler_failed without delivery",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_700_000_000_000);
+      const tenantId = tenant();
+      const agentId = await insertAgent(sql, tenantId);
+      const sessionId = await insertOpenSession(sql, tenantId, agentId);
+
+      // Close the session
+      await sql`UPDATE sessions SET closed_at = now() WHERE id = ${sessionId}`;
+
+      const widResult = WorkItemId.parse(randomUUID());
+      assert(widResult.ok, "fixture: WorkItemId.parse failed");
+      const inboundResult = await writeInboundMessage(sql, {
+        tenantId,
+        targetSessionId: sessionId,
+        sender: { type: "human", id: "u" },
+        content: "Too late",
+        receivedAt: new Date(clock.now()),
+        sourceWorkItemId: widResult.value,
+      });
+      assert(inboundResult.ok, "fixture: writeInboundMessage failed");
+
+      const workItem: WorkItem = {
+        id: widResult.value,
+        tenantId,
+        kind: "inbound_message",
+        payloadRef: inboundResult.value,
+        scheduledAt: new Date(clock.now()),
+        attempts: 1,
+      };
+      const result = await triggerHandlers({ sql, clock }).inbound_message(
+        workItem,
+        new AbortController().signal,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("handler_failed");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "missing target session returns handler_failed",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_700_000_000_000);
+      const tenantId = tenant();
+      const agentId = await insertAgent(sql, tenantId);
+      const sessionId = await insertOpenSession(sql, tenantId, agentId);
+
+      const widResult = WorkItemId.parse(randomUUID());
+      assert(widResult.ok, "fixture: WorkItemId.parse failed");
+      const inboundResult = await writeInboundMessage(sql, {
+        tenantId,
+        targetSessionId: sessionId,
+        sender: { type: "human", id: "u" },
+        content: "Ghost session",
+        receivedAt: new Date(clock.now()),
+        sourceWorkItemId: widResult.value,
+      });
+      assert(inboundResult.ok, "fixture: writeInboundMessage failed");
+
+      // Disable FK checks to reroute the inbound to a non-existent session, then delete
+      // the original session. ON DELETE CASCADE would otherwise silently remove the inbound.
+      await sql.unsafe(`SET session_replication_role = 'replica'`);
+      await sql`UPDATE inbound_messages SET target_session_id = ${randomUUID()} WHERE id = ${inboundResult.value}`;
+      await sql.unsafe(`SET session_replication_role = 'origin'`);
+      await sql`DELETE FROM sessions WHERE id = ${sessionId}`;
+
+      const workItem: WorkItem = {
+        id: widResult.value,
+        tenantId,
+        kind: "inbound_message",
+        payloadRef: inboundResult.value,
+        scheduledAt: new Date(clock.now()),
+        attempts: 1,
+      };
+      const result = await triggerHandlers({ sql, clock }).inbound_message(
+        workItem,
+        new AbortController().signal,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("handler_failed");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "target session in different tenant than inbound returns handler_failed",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_700_000_000_000);
+      const tenantA = tenant();
+      const tenantB = tenant();
+      const agentA = await insertAgent(sql, tenantA);
+      const agentB = await insertAgent(sql, tenantB);
+      const sessionA = await insertOpenSession(sql, tenantA, agentA);
+      const sessionB = await insertOpenSession(sql, tenantB, agentB);
+
+      const widResult = WorkItemId.parse(randomUUID());
+      assert(widResult.ok, "fixture: WorkItemId.parse failed");
+
+      // Write inbound targeting sessionA under tenantA, but set target to sessionB
+      const inboundResult = await writeInboundMessage(sql, {
+        tenantId: tenantA,
+        targetSessionId: sessionA,
+        sender: { type: "human", id: "u" },
+        content: "Cross-tenant target",
+        receivedAt: new Date(clock.now()),
+        sourceWorkItemId: widResult.value,
+      });
+      assert(inboundResult.ok, "fixture: writeInboundMessage failed");
+
+      // Manually update the target_session_id to point to a different tenant's session
+      await sql`UPDATE inbound_messages SET target_session_id = ${sessionB} WHERE id = ${inboundResult.value}`;
+
+      const workItem: WorkItem = {
+        id: widResult.value,
+        tenantId: tenantA,
+        kind: "inbound_message",
+        payloadRef: inboundResult.value,
+        scheduledAt: new Date(clock.now()),
+        attempts: 1,
+      };
+      const result = await triggerHandlers({ sql, clock }).inbound_message(
+        workItem,
+        new AbortController().signal,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("handler_failed");
     },
     HOOK_TIMEOUT_MS,
   );

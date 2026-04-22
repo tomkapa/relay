@@ -58,6 +58,8 @@ export const Attr = {
   HookDecision: "relay.hook.decision",
   ToolName: "relay.tool.name",
   TriggerKind: "relay.trigger.kind",
+  SenderType: "relay.sender.type",
+  InboundMessageId: "relay.inbound_message.id",
   QueueOp: "relay.queue.op",
   QueueBatch: "relay.queue.batch",
   QueuePicked: "relay.queue.picked",
