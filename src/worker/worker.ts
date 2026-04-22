@@ -16,7 +16,7 @@ import {
   renewLease as dbRenewLease,
 } from "../work_queue/queue-ops.ts";
 import type { DequeueParams, WorkItem, WorkQueueError, WorkerId } from "../work_queue/queue.ts";
-import type { Dispatcher } from "./dispatcher.ts";
+import type { Dispatcher, HandlerError } from "./dispatcher.ts";
 import {
   EMPTY_QUEUE_IDLE_MS,
   IDLE_BACKOFF_CAP_MS,
@@ -140,21 +140,26 @@ async function processItem(deps: WorkerDeps, item: WorkItem, signal: AbortSignal
   // Start lease renewal loop concurrently with handler.
   const renewPromise = startRenewLoop(deps, item.id, renewMs, renewCtrl.signal);
 
-  const handlerResult = await withSpan(
-    SpanName.WorkerHandle,
-    {
-      [Attr.WorkId]: item.id,
-      [Attr.WorkKind]: item.kind,
-    },
-    async () => {
-      const handler = deps.dispatcher[item.kind];
-      return handler(item, signal);
-    },
-  );
-
-  // Stop renew loop whether handler succeeded or failed.
-  renewCtrl.abort();
-  await renewPromise;
+  // try/finally so the renew loop is cleaned up on any handler outcome — ok, err, or throw.
+  // A handler that throws (e.g. from an aborted clock.sleep propagating) would otherwise
+  // leave the renew loop orphaned, firing renewLease queries after the worker has exited.
+  let handlerResult: Result<void, HandlerError>;
+  try {
+    handlerResult = await withSpan(
+      SpanName.WorkerHandle,
+      {
+        [Attr.WorkId]: item.id,
+        [Attr.WorkKind]: item.kind,
+      },
+      async () => {
+        const handler = deps.dispatcher[item.kind];
+        return handler(item, signal);
+      },
+    );
+  } finally {
+    renewCtrl.abort();
+    await renewPromise;
+  }
 
   if (handlerResult.ok) {
     const completeResult = await deps.queue.complete(item.id, deps.workerId);
