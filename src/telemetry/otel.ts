@@ -36,6 +36,8 @@ export const SpanName = {
   MemoryConsolidate: "memory.consolidate",
   ConnectorDispatch: "connector.dispatch",
   WorkerPick: "worker.pick",
+  WorkerTick: "worker.tick",
+  WorkerHandle: "worker.handle",
 } as const;
 export type SpanName = (typeof SpanName)[keyof typeof SpanName];
 
@@ -56,6 +58,9 @@ export const Attr = {
   QueueOp: "relay.queue.op",
   QueueBatch: "relay.queue.batch",
   QueuePicked: "relay.queue.picked",
+  WorkId: "relay.work.id",
+  WorkKind: "relay.work.kind",
+  WorkerId: "relay.worker.id",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 

@@ -21,4 +21,6 @@ coveragePathIgnorePatterns = [
   "src/http/app.ts",
   "src/http/routes/agents.ts",
   "src/http/server.ts",
+  # Worker entrypoint — reads env and bootstraps process, covered by integration/worker tests.
+  "src/worker/main.ts",
 ]
