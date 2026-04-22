@@ -19,7 +19,6 @@ import {
   type WorkItemId,
 } from "../ids.ts";
 import { Attr, SpanName, withSpan } from "../telemetry/otel.ts";
-import { MAX_INITIAL_TRANSCRIPT_BYTES } from "./limits.ts";
 import type { TranscriptEntry } from "./transcript.ts";
 
 export type CreateSessionSpec = Readonly<{
@@ -29,14 +28,13 @@ export type CreateSessionSpec = Readonly<{
   parentSessionId: SessionIdBrand | null;
   chainId: ChainIdBrand;
   depth: Depth;
-  openingContext: readonly TranscriptEntry[];
+  openingContext: readonly TranscriptEntry[]; // computed by trigger synthesizer; passed to runTurnLoop (RELAY-8)
   sourceWorkItemId: WorkItemId;
 }>;
 
 export type SessionCreateError =
   | { kind: "agent_not_found"; agentId: AgentIdBrand }
-  | { kind: "tenant_mismatch"; expected: TenantIdBrand; got: TenantIdBrand }
-  | { kind: "transcript_too_large"; bytes: number; max: number };
+  | { kind: "tenant_mismatch"; expected: TenantIdBrand; got: TenantIdBrand };
 
 // Sentinel thrown inside sql.begin to abort with a typed error; never escapes createSession.
 class TxAbort extends Error {
@@ -79,7 +77,7 @@ async function insertSession(
     INSERT INTO sessions (
       id, agent_id, tenant_id, originating_trigger,
       parent_session_id, chain_id, depth,
-      turn_transcript, source_work_item_id,
+      source_work_item_id,
       created_at, updated_at
     )
     VALUES (
@@ -90,7 +88,6 @@ async function insertSession(
       ${spec.parentSessionId},
       ${spec.chainId},
       ${spec.depth as number},
-      ${tx.json(spec.openingContext as unknown as DbJson)},
       ${spec.sourceWorkItemId},
       ${createdAt},
       ${createdAt}
@@ -123,15 +120,6 @@ export async function createSession(
   clock: Clock,
   spec: CreateSessionSpec,
 ): Promise<Result<{ id: SessionIdBrand; isDuplicate: boolean }, SessionCreateError>> {
-  const transcriptBytes = JSON.stringify(spec.openingContext).length;
-  if (transcriptBytes > MAX_INITIAL_TRANSCRIPT_BYTES) {
-    return err({
-      kind: "transcript_too_large",
-      bytes: transcriptBytes,
-      max: MAX_INITIAL_TRANSCRIPT_BYTES,
-    });
-  }
-
   const newId = mintId(SessionId.parse, "createSession");
   const createdAt = new Date(clock.now());
 
