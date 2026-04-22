@@ -679,6 +679,65 @@ describe("runWorker", () => {
     await workerPromise;
   });
 
+  test("handler throwing still cleans up the renew loop (no orphaned renewals)", async () => {
+    // Regression: if a handler rejects (e.g. a clock.sleep that receives abort and throws),
+    // processItem must still abort the renew loop. Previously the renew loop was orphaned
+    // and kept firing renewLease queries after the handler threw, which surfaced as an
+    // "unhandled error between tests" CONNECTION_ENDED in integration when the Sql was
+    // closed mid-flight.
+    const item = makeItem("task_fire");
+    const renewMs = 100;
+    const workerId = makeWorkerId();
+
+    let renewCount = 0;
+    let dequeueCount = 0;
+    const queue: WorkerQueue = {
+      dequeue: (): Promise<Result<readonly WorkItem[], WorkQueueError>> => {
+        dequeueCount++;
+        if (dequeueCount === 1) return Promise.resolve(ok([item]));
+        ctrl.abort();
+        return Promise.resolve(ok([]));
+      },
+      complete: () => Promise.resolve(ok(undefined)),
+      release: () => Promise.resolve(ok(undefined)),
+      renewLease: (): Promise<Result<void, WorkQueueError>> => {
+        renewCount++;
+        return Promise.resolve(ok(undefined));
+      },
+    };
+
+    const throwingDispatcher: Dispatcher = {
+      session_start: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
+      task_fire: (): Promise<Result<void, HandlerError>> =>
+        Promise.reject(new Error("handler crashed")),
+      inbound_message: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
+    };
+
+    const workerPromise = runWorker(
+      {
+        queue,
+        workerId,
+        clock,
+        dispatcher: throwingDispatcher,
+        emptyIdleMs: 100,
+        errorBackoffMs: 50,
+        leaseRenewMs: renewMs,
+      },
+      ctrl.signal,
+    );
+
+    // Let the handler run (and throw), then advance clock well past renewMs.
+    // A properly-cleaned-up renew loop should not wake to fire any renewals.
+    await flush(30);
+    clock.advance(renewMs * 5);
+    await flush(30);
+    clock.advance(50);
+    await flush(30);
+    await workerPromise;
+
+    expect(renewCount).toBe(0);
+  });
+
   test("renewLease returning lease_not_held stops the renew loop", async () => {
     const item = makeItem("task_fire");
     const renewMs = 100;

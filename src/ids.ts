@@ -18,6 +18,7 @@ export type UserId = Brand<string, "UserId">;
 export type ChainId = Brand<string, "ChainId">;
 export type WorkItemId = Brand<string, "WorkItemId">;
 export type EnvelopeId = Brand<string, "EnvelopeId">;
+export type InboundMessageId = Brand<string, "InboundMessageId">;
 
 export type IdParseError =
   | { kind: "empty" }
@@ -68,6 +69,10 @@ export const WorkItemId = {
 };
 export const EnvelopeId = {
   parse: (raw: string): Result<EnvelopeId, IdParseError> => parseUuid<"EnvelopeId">(raw),
+};
+export const InboundMessageId = {
+  parse: (raw: string): Result<InboundMessageId, IdParseError> =>
+    parseUuid<"InboundMessageId">(raw),
 };
 
 // Mint a new UUID-based branded id. Asserts that randomUUID() produces a valid value,

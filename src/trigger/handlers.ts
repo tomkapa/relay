@@ -1,6 +1,5 @@
-// Trigger handlers: session_start, task_fire, and an inbound_message stub (RELAY-47).
-// Each handler owns its full chain: resolve payload_ref → load agent → create session
-// → emit telemetry. Prompt synthesis is the only kind-specific step.
+// Trigger handlers: session_start, task_fire, inbound_message.
+// Each handler owns its full chain: resolve payload_ref → validate → emit telemetry.
 // SPEC §Triggers, CLAUDE.md §6 (AssertionErrors crash the worker; operating errors return err).
 
 import type { Sql } from "postgres";
@@ -8,7 +7,7 @@ import { assert } from "../core/assert.ts";
 import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result, unreachable } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
-import { ChainId, Depth, EnvelopeId, TaskId, TenantId, mintId } from "../ids.ts";
+import { ChainId, Depth, EnvelopeId, InboundMessageId, TaskId, TenantId, mintId } from "../ids.ts";
 import type {
   ChainId as ChainIdBrand,
   Depth as DepthBrand,
@@ -27,6 +26,12 @@ import type { TaskRow, TriggerPayload, TriggerPayloadError } from "./payload.ts"
 import { synthesizeOpeningContext } from "./synthesize.ts";
 import { createSession } from "../session/create.ts";
 import type { SessionCreateError } from "../session/create.ts";
+import { readInboundMessage } from "./inbound/inbound-ops.ts";
+import type { InboundOpsError } from "./inbound/inbound-ops.ts";
+import { parseInboundMessageRow } from "./inbound/payload.ts";
+import type { InboundPayloadError } from "./inbound/payload.ts";
+import { loadOpenTargetSession } from "../session/load-open.ts";
+import type { TargetSessionError } from "../session/load-open.ts";
 
 export type HandlerDeps = {
   readonly sql: Sql;
@@ -40,6 +45,10 @@ type HookResult = { decision: "approve" } | { decision: "deny"; reason: string }
 // NOTE: Session row is already committed before this check. If the real evaluator can deny,
 // the deny path must either run before createSession or handle the orphaned row (RELAY-36).
 const hookStub: (sessionId: SessionIdBrand, payload: TriggerPayload) => Promise<HookResult> = () =>
+  Promise.resolve({ decision: "approve" });
+
+// Pass-through stub for RELAY-36/37 evaluator.
+const preMessageReceiveStub: () => Promise<HookResult> = () =>
   Promise.resolve({ decision: "approve" });
 
 function mapPayloadError(e: TriggerPayloadError): HandlerError {
@@ -272,16 +281,141 @@ async function handleTaskFire(
   );
 }
 
+function mapInboundOpsError(e: InboundOpsError): HandlerError {
+  switch (e.kind) {
+    case "inbound_not_found":
+      return { kind: "handler_failed", reason: `inbound message not found: ${e.id as string}` };
+    case "content_too_long":
+      return {
+        kind: "handler_failed",
+        reason: `inbound content too long: ${e.length.toString()} > ${e.max.toString()}`,
+      };
+    case "sender_id_too_long":
+      return {
+        kind: "handler_failed",
+        reason: `inbound sender_id too long: ${e.length.toString()} > ${e.max.toString()}`,
+      };
+    default:
+      throw unreachable(e);
+  }
+}
+
+function mapInboundPayloadError(e: InboundPayloadError): HandlerError {
+  switch (e.kind) {
+    case "validation_failed":
+      return { kind: "handler_failed", reason: "inbound payload validation failed" };
+    case "content_too_long":
+      return {
+        kind: "handler_failed",
+        reason: `inbound content too long: ${e.length.toString()} > ${e.max.toString()}`,
+      };
+    case "unknown_kind":
+      return { kind: "handler_failed", reason: `unknown inbound kind: ${e.value}` };
+    case "session_id_invalid":
+      return { kind: "handler_failed", reason: `invalid target_session_id: ${e.reason}` };
+    case "sender_id_too_long":
+      return {
+        kind: "handler_failed",
+        reason: `inbound sender_id too long: ${e.length.toString()} > ${e.max.toString()}`,
+      };
+    default:
+      throw unreachable(e);
+  }
+}
+
+function mapTargetSessionError(e: TargetSessionError): HandlerError {
+  switch (e.kind) {
+    case "target_session_not_found":
+      return { kind: "handler_failed", reason: `target session not found: ${e.id as string}` };
+    case "target_session_closed":
+      return {
+        kind: "handler_failed",
+        reason: `target session is closed: ${e.id as string}`,
+      };
+    case "target_session_tenant_mismatch":
+      return {
+        kind: "handler_failed",
+        reason: `target session tenant mismatch: expected ${e.expected as string}, got ${e.got as string}`,
+      };
+    case "agent_not_found":
+      return { kind: "handler_failed", reason: `agent not found: ${e.id as string}` };
+    default:
+      throw unreachable(e);
+  }
+}
+
+async function handleInboundMessage(
+  deps: HandlerDeps,
+  item: WorkItem,
+): Promise<Result<void, HandlerError>> {
+  return withSpan(
+    SpanName.TriggerIngest,
+    { [Attr.TriggerKind]: item.kind, [Attr.TenantId]: item.tenantId },
+    async () => {
+      const start = deps.clock.monotonic();
+
+      const inboundIdResult = InboundMessageId.parse(item.payloadRef);
+      if (!inboundIdResult.ok) {
+        return err<HandlerError>({
+          kind: "handler_failed",
+          reason: `invalid inbound_message id in payload_ref: ${inboundIdResult.error.kind}`,
+        });
+      }
+
+      const rowResult = await readInboundMessage(deps.sql, inboundIdResult.value);
+      if (!rowResult.ok) return err(mapInboundOpsError(rowResult.error));
+      const row = rowResult.value;
+
+      const rowTenantResult = TenantId.parse(row.tenant_id);
+      assert(rowTenantResult.ok, "handleInboundMessage: invalid tenant_id from DB", {
+        tenant_id: row.tenant_id,
+      });
+      if (rowTenantResult.value !== item.tenantId) {
+        return err<HandlerError>({
+          kind: "handler_failed",
+          reason: "inbound tenant_id does not match work item tenant_id",
+        });
+      }
+
+      const payloadResult = parseInboundMessageRow(row);
+      if (!payloadResult.ok) return err(mapInboundPayloadError(payloadResult.error));
+      const payload = payloadResult.value;
+
+      const targetResult = await loadOpenTargetSession(
+        deps.sql,
+        payload.targetSessionId,
+        item.tenantId,
+      );
+      if (!targetResult.ok) return err(mapTargetSessionError(targetResult.error));
+
+      const hook = await preMessageReceiveStub();
+      if (hook.decision === "deny") {
+        return err<HandlerError>({ kind: "handler_failed", reason: `hook denied: ${hook.reason}` });
+      }
+
+      counter("trigger.inbound_message_delivered_total").add(1, {
+        [Attr.TriggerKind]: item.kind,
+        [Attr.SenderType]: payload.sender.type,
+      });
+      emit("INFO", "trigger.inbound_message.ready", {
+        [Attr.TenantId]: item.tenantId,
+        [Attr.SessionId]: payload.targetSessionId,
+        [Attr.InboundMessageId]: inboundIdResult.value,
+        [Attr.WorkId]: item.id,
+      });
+      histogram("trigger.handler_duration_ms").record(deps.clock.monotonic() - start, {
+        [Attr.TriggerKind]: item.kind,
+      });
+
+      return ok(undefined);
+    },
+  );
+}
+
 export function triggerHandlers(deps: HandlerDeps): Dispatcher {
   return {
     session_start: (item) => handleSessionStart(deps, item),
     task_fire: (item) => handleTaskFire(deps, item),
-    inbound_message: () =>
-      Promise.resolve(
-        err<HandlerError>({
-          kind: "handler_failed",
-          reason: "not implemented: inbound_message (owned by RELAY-47)",
-        }),
-      ),
+    inbound_message: (item) => handleInboundMessage(deps, item),
   };
 }
