@@ -16,8 +16,8 @@ import {
   type UpDownCounter,
 } from "@opentelemetry/api";
 
-const INSTRUMENTATION_NAME = "relay";
-const INSTRUMENTATION_VERSION = "0.0.0";
+export const INSTRUMENTATION_NAME = "relay";
+export const INSTRUMENTATION_VERSION = "0.0.0";
 
 export const tracer: Tracer = trace.getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
 export const meter: Meter = metrics.getMeter(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
@@ -72,6 +72,7 @@ export const Attr = {
   HookReason: "relay.hook.reason",
   TurnLoopOutcome: "relay.turn_loop.outcome",
   TurnsCount: "relay.turns.count",
+  Outcome: "relay.outcome",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 
@@ -121,10 +122,19 @@ const counters = new Map<string, Counter>();
 const upDownCounters = new Map<string, UpDownCounter>();
 const histograms = new Map<string, Histogram>();
 
+let _testMeter: Meter | undefined;
+
+function getInstrumentMeter(): Meter {
+  return _testMeter ?? metrics.getMeter(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
+}
+
 export function counter(name: string, description?: string): Counter {
   let c = counters.get(name);
   if (!c) {
-    c = meter.createCounter(name, description !== undefined ? { description } : undefined);
+    c = getInstrumentMeter().createCounter(
+      name,
+      description !== undefined ? { description } : undefined,
+    );
     counters.set(name, c);
   }
   return c;
@@ -133,7 +143,10 @@ export function counter(name: string, description?: string): Counter {
 export function upDownCounter(name: string, description?: string): UpDownCounter {
   let c = upDownCounters.get(name);
   if (!c) {
-    c = meter.createUpDownCounter(name, description !== undefined ? { description } : undefined);
+    c = getInstrumentMeter().createUpDownCounter(
+      name,
+      description !== undefined ? { description } : undefined,
+    );
     upDownCounters.set(name, c);
   }
   return c;
@@ -145,8 +158,19 @@ export function histogram(name: string, description?: string, unit?: string): Hi
     const options: { description?: string; unit?: string } = {};
     if (description !== undefined) options.description = description;
     if (unit !== undefined) options.unit = unit;
-    h = meter.createHistogram(name, options);
+    h = getInstrumentMeter().createHistogram(name, options);
     histograms.set(name, h);
   }
   return h;
+}
+
+// Install a test meter so instruments are created on a controllable provider.
+// Clears all cached handles so the first call after installation creates fresh instruments
+// on the test meter. Pass undefined to restore production (global OTel API) behavior.
+// Never call in production code.
+export function _setMeterForTest(m: Meter | undefined): void {
+  _testMeter = m;
+  counters.clear();
+  upDownCounters.clear();
+  histograms.clear();
 }

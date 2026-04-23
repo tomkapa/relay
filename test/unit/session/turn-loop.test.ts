@@ -1,7 +1,7 @@
 // Unit tests for the agentic turn loop. Uses fake ModelClient, ToolRegistry, Clock, and Sql.
 // Anthropic is a paid external service — CLAUDE.md §3 explicitly permits mocking it.
 
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import { FakeClock } from "../../../src/core/clock.ts";
@@ -17,6 +17,12 @@ import type { ToolRegistry, ToolResult } from "../../../src/session/tools.ts";
 import { runTurnLoop } from "../../../src/session/turn-loop.ts";
 import type { Message, ModelResponse, TextBlock, ToolUseBlock } from "../../../src/session/turn.ts";
 import { InMemoryToolRegistry, echoTool } from "../../../src/session/tools-inmemory.ts";
+import {
+  installMetricFixture,
+  uninstallMetricFixture,
+  sumCounter,
+  type MetricFixture,
+} from "../../helpers/metrics.ts";
 
 // Minimal fake Sql: INSERT returns no rows; sql.json passes value through.
 function makeFakeSql(): Sql {
@@ -305,5 +311,160 @@ describe("runTurnLoop", () => {
         { ...ids, systemPrompt: "sys", initialMessages: [] },
       ),
     ).rejects.toThrow();
+  });
+});
+
+describe("saturation counters — turn loop", () => {
+  let fixture: MetricFixture;
+
+  beforeEach(() => {
+    fixture = installMetricFixture();
+    clock = new FakeClock(1_000_000);
+    sql = makeFakeSql();
+    ids = makeIds();
+  });
+
+  afterEach(async () => {
+    await uninstallMetricFixture();
+  });
+
+  test("2-turn happy path: iteration_total=2, completion_total=1 {outcome=end_turn}", async () => {
+    let callCount = 0;
+    const model: ModelClient = {
+      complete: () => {
+        callCount++;
+        if (callCount === 1)
+          return Promise.resolve(toolUseResponse("tc_1", "echo", { text: "ping" }));
+        return Promise.resolve(textResponse("done"));
+      },
+    };
+    const tools = new InMemoryToolRegistry([echoTool]);
+
+    const result = await runTurnLoop(
+      { sql, clock, model, tools, maxTurns: 10 },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+    expect(result.ok).toBe(true);
+
+    const rm = await fixture.collect();
+    expect(sumCounter(rm, "relay.turn_loop.iteration_total")).toBe(2);
+    expect(
+      sumCounter(rm, "relay.turn_loop.completion_total", { "relay.outcome": "end_turn" }),
+    ).toBe(1);
+  });
+
+  test("cap exceeded: iteration_total=2, completion_total=1 {outcome=cap_exceeded}", async () => {
+    const model: ModelClient = {
+      complete: () =>
+        Promise.resolve({
+          content: [{ type: "text" as const, text: "going" }],
+          stopReason: "max_tokens" as const,
+          usage: { inputTokens: 1, outputTokens: 1 },
+        }),
+    };
+    const tools = new InMemoryToolRegistry([]);
+
+    await runTurnLoop(
+      { sql, clock, model, tools, maxTurns: 2 },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+
+    const rm = await fixture.collect();
+    expect(sumCounter(rm, "relay.turn_loop.iteration_total")).toBe(2);
+    expect(
+      sumCounter(rm, "relay.turn_loop.completion_total", { "relay.outcome": "cap_exceeded" }),
+    ).toBe(1);
+  });
+
+  test("model error: iteration_total=1, completion_total=1 {outcome=model_error}", async () => {
+    const model: ModelClient = {
+      complete: () => Promise.reject(new Error("api down")),
+    };
+    const tools = new InMemoryToolRegistry([]);
+
+    await runTurnLoop(
+      { sql, clock, model, tools, maxTurns: 10 },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+
+    const rm = await fixture.collect();
+    expect(sumCounter(rm, "relay.turn_loop.iteration_total")).toBe(1);
+    expect(
+      sumCounter(rm, "relay.turn_loop.completion_total", { "relay.outcome": "model_error" }),
+    ).toBe(1);
+  });
+});
+
+describe("saturation counters — tool dispatch", () => {
+  let fixture: MetricFixture;
+
+  beforeEach(() => {
+    fixture = installMetricFixture();
+    clock = new FakeClock(1_000_000);
+    sql = makeFakeSql();
+    ids = makeIds();
+  });
+
+  afterEach(async () => {
+    await uninstallMetricFixture();
+  });
+
+  test("two tool_use blocks: dispatch_iteration_total=2, two {outcome=invoked}", async () => {
+    let callCount = 0;
+    const model: ModelClient = {
+      complete: () => {
+        callCount++;
+        if (callCount === 1)
+          return Promise.resolve({
+            content: [
+              { type: "tool_use" as const, id: "tc_a", name: "echo", input: { text: "a" } },
+              { type: "tool_use" as const, id: "tc_b", name: "echo", input: { text: "b" } },
+            ],
+            stopReason: "tool_use" as const,
+            usage: { inputTokens: 5, outputTokens: 3 },
+          });
+        return Promise.resolve(textResponse("done"));
+      },
+    };
+    const tools = new InMemoryToolRegistry([echoTool]);
+
+    const result = await runTurnLoop(
+      { sql, clock, model, tools, maxTurns: 10 },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+    expect(result.ok).toBe(true);
+
+    const rm = await fixture.collect();
+    expect(sumCounter(rm, "relay.tool.dispatch_iteration_total")).toBe(2);
+    expect(
+      sumCounter(rm, "relay.tool.dispatch_completion_total", { "relay.outcome": "invoked" }),
+    ).toBe(2);
+  });
+
+  test("unknown tool: dispatch_iteration_total=1, {outcome=tool_unknown}", async () => {
+    const model: ModelClient = {
+      complete: () =>
+        Promise.resolve({
+          content: [{ type: "tool_use" as const, id: "tc_x", name: "ghost", input: {} }],
+          stopReason: "tool_use" as const,
+          usage: { inputTokens: 5, outputTokens: 3 },
+        }),
+    };
+    const tools = new InMemoryToolRegistry([]);
+
+    const result = await runTurnLoop(
+      { sql, clock, model, tools, maxTurns: 10 },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+    expect(result.ok).toBe(false);
+
+    const rm = await fixture.collect();
+    expect(sumCounter(rm, "relay.tool.dispatch_iteration_total")).toBe(1);
+    expect(
+      sumCounter(rm, "relay.tool.dispatch_completion_total", {
+        "relay.outcome": "tool_unknown",
+        "relay.tool.name": "ghost",
+      }),
+    ).toBe(1);
   });
 });

@@ -8,7 +8,7 @@ import type { Sql } from "postgres";
 import { AssertionError, assert } from "../core/assert.ts";
 import type { Clock } from "../core/clock.ts";
 import type { Result } from "../core/result.ts";
-import { Attr, SpanName, emit, withSpan } from "../telemetry/otel.ts";
+import { Attr, SpanName, counter, emit, withSpan } from "../telemetry/otel.ts";
 import {
   complete as dbComplete,
   dequeue as dbDequeue,
@@ -67,9 +67,21 @@ export async function runWorker(deps: WorkerDeps, signal: AbortSignal): Promise<
   assert(idleMs > 0, "worker: emptyIdleMs must be positive", { idleMs });
   assert(errorMs > 0, "worker: errorBackoffMs must be positive", { errorMs });
 
+  const workerIterations = counter(
+    "relay.worker.tick_iteration_total",
+    "Worker poll iterations. Rate = per-worker poll frequency (includes idle polls).",
+  );
+  const workerCompletions = counter(
+    "relay.worker.tick_completion_total",
+    "Per-poll outcomes. relay.outcome ∈ {processed, idle, error}.",
+  );
+
+  const workerAttrs = { [Attr.WorkerId]: deps.workerId };
   let consecutiveIdles = 0;
 
   while (!signal.aborted) {
+    workerIterations.add(1, workerAttrs);
+
     let outcome: "processed" | "idle" | "error";
     try {
       outcome = await pollOnce(deps, signal);
@@ -78,6 +90,8 @@ export async function runWorker(deps: WorkerDeps, signal: AbortSignal): Promise<
       emit("ERROR", "worker.loop.error", { "relay.worker.error": String(e) });
       outcome = "error";
     }
+
+    workerCompletions.add(1, { ...workerAttrs, [Attr.Outcome]: outcome });
 
     if (outcome === "processed") {
       consecutiveIdles = 0;

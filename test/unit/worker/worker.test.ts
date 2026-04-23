@@ -2,23 +2,29 @@
 // and an in-memory WorkerQueue fake for clean isolation from Postgres.
 // CLAUDE.md §3 — test observable behaviour at a boundary; never mock internal state.
 
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { AssertionError } from "../../../src/core/assert.ts";
 import { FakeClock } from "../../../src/core/clock.ts";
 import { err, ok, type Result } from "../../../src/core/result.ts";
 import type { WorkItemId } from "../../../src/ids.ts";
 import { WorkItemId as WorkItemIdParser, TenantId } from "../../../src/ids.ts";
-import type {
-  WorkItem,
-  WorkKind,
-  WorkQueueError,
+import {
+  type WorkItem,
+  type WorkKind,
+  type WorkQueueError,
   WorkerId,
 } from "../../../src/work_queue/queue.ts";
 import type { Dispatcher, HandlerError } from "../../../src/worker/dispatcher.ts";
 import { EMPTY_QUEUE_IDLE_MS, IDLE_BACKOFF_CAP_MS } from "../../../src/worker/limits.ts";
 import type { WorkerQueue } from "../../../src/worker/worker.ts";
 import { runWorker } from "../../../src/worker/worker.ts";
+import {
+  installMetricFixture,
+  uninstallMetricFixture,
+  sumCounter,
+  type MetricFixture,
+} from "../../helpers/metrics.ts";
 
 // Allow many promise microtask flushes to propagate async state machines.
 async function flush(n = 20): Promise<void> {
@@ -811,5 +817,101 @@ describe("runWorker", () => {
     await workerPromise;
 
     expect(renewCount).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("saturation counters — worker tick", () => {
+  let fixture: MetricFixture;
+  const workerIdResult = WorkerId.parse("counter-test-worker");
+  if (!workerIdResult.ok) throw new Error("counter-test-worker: invalid WorkerId");
+  const WORKER_ID = workerIdResult.value;
+
+  beforeEach(() => {
+    fixture = installMetricFixture();
+    clock = new FakeClock(1_000_000);
+    ctrl = new AbortController();
+  });
+
+  afterEach(async () => {
+    await uninstallMetricFixture();
+  });
+
+  test("3 idle polls then abort: iteration_total=3, completion_total=3 {outcome=idle}", async () => {
+    let dequeueCount = 0;
+    const queue: WorkerQueue = {
+      dequeue: (): Promise<Result<readonly WorkItem[], WorkQueueError>> => {
+        dequeueCount++;
+        if (dequeueCount >= 3) ctrl.abort(); // abort during 3rd dequeue → exactly 3 iterations
+        return Promise.resolve(ok([]));
+      },
+      complete: () => Promise.resolve(ok(undefined)),
+      release: () => Promise.resolve(ok(undefined)),
+      renewLease: () => Promise.resolve(ok(undefined)),
+    };
+
+    const workerPromise = runWorker(
+      { queue, workerId: WORKER_ID, clock, dispatcher: makeNoopDispatcher(), emptyIdleMs: 50 },
+      ctrl.signal,
+    );
+
+    for (let i = 0; i < 5; i++) {
+      await flush();
+      clock.advance(IDLE_BACKOFF_CAP_MS * 2);
+    }
+    await flush();
+    await workerPromise;
+
+    const rm = await fixture.collect();
+    expect(sumCounter(rm, "relay.worker.tick_iteration_total")).toBe(3);
+    expect(sumCounter(rm, "relay.worker.tick_completion_total", { "relay.outcome": "idle" })).toBe(
+      3,
+    );
+  });
+
+  test("one processed + one error outcome: correct completion attributes", async () => {
+    const item = makeItem("task_fire");
+    let dequeueCount = 0;
+    const queue: WorkerQueue = {
+      dequeue: (): Promise<Result<readonly WorkItem[], WorkQueueError>> => {
+        dequeueCount++;
+        if (dequeueCount === 1) return Promise.resolve(ok([item]));
+        if (dequeueCount === 2) throw new Error("db flap");
+        ctrl.abort();
+        return Promise.resolve(ok([]));
+      },
+      complete: () => Promise.resolve(ok(undefined)),
+      release: () => Promise.resolve(ok(undefined)),
+      renewLease: () => Promise.resolve(ok(undefined)),
+    };
+
+    const workerPromise = runWorker(
+      {
+        queue,
+        workerId: WORKER_ID,
+        clock,
+        dispatcher: makeNoopDispatcher(),
+        emptyIdleMs: 50,
+        errorBackoffMs: 50,
+        leaseRenewMs: 50_000,
+      },
+      ctrl.signal,
+    );
+
+    await flush(50);
+    clock.advance(50); // trigger idle sleep after processed
+    await flush(50);
+    clock.advance(50); // trigger error backoff
+    await flush(50);
+    clock.advance(50); // trigger idle sleep again
+    await flush(50);
+    await workerPromise;
+
+    const rm = await fixture.collect();
+    expect(
+      sumCounter(rm, "relay.worker.tick_completion_total", { "relay.outcome": "processed" }),
+    ).toBe(1);
+    expect(sumCounter(rm, "relay.worker.tick_completion_total", { "relay.outcome": "error" })).toBe(
+      1,
+    );
   });
 });
