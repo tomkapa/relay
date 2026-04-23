@@ -168,18 +168,20 @@ describeOrSkip("POST /trigger (integration)", () => {
       // Start the HTTP request (don't await — it will hold until NOTIFY).
       const responsePending = postTrigger(app, triggerBody);
 
-      // Give the route handler time to register the deferred and enqueue.
-      await new Promise<void>((r) => {
-        const handle = setTimeout(r, 200);
-        handle.unref();
-      });
-
-      // Read the enqueued work item to get the envelopeId.
-      const workItems = await sql<{ payload_ref: string }[]>`
-        SELECT payload_ref FROM work_queue ORDER BY created_at DESC LIMIT 1
-      `;
-      assert(workItems.length > 0, "fixture: enqueue must have written a work item");
-      const envelopeId = workItems[0]!.payload_ref;
+      // Poll work_queue until the route handler's enqueue commits. Each SQL
+      // round-trip yields the event loop, giving writeEnvelope + enqueue time
+      // to complete without relying on a fixed real-time wait.
+      let envelopeId: string | undefined;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const rows = await sql<{ payload_ref: string }[]>`
+          SELECT payload_ref FROM work_queue ORDER BY created_at DESC LIMIT 1
+        `;
+        if (rows.length > 0) {
+          envelopeId = rows[0]!.payload_ref;
+          break;
+        }
+      }
+      assert(envelopeId !== undefined, "fixture: work item never appeared in work_queue");
 
       // Insert session referencing envelopeId (simulates worker createSession).
       const sessionId = await insertSession(sql, agentId, tenantId, envelopeId);
@@ -274,12 +276,9 @@ describeOrSkip("POST /trigger (integration)", () => {
         });
         assert(closeResult.ok, "fixture: close must succeed");
 
-        // Allow any pending LISTEN callbacks to fire.
-        await new Promise<void>((r) => {
-          const h = setTimeout(r, 100);
-          h.unref();
-        });
-
+        // No wait needed: emitSessionSyncClose checks envelope_id === null and
+        // returns before calling sql.notify, so no notification is ever sent and
+        // the LISTEN callback cannot fire for this session.
         expect(notifyReceived).toBe(false);
       } finally {
         await stop();

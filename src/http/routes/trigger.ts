@@ -4,13 +4,14 @@
 
 import { Hono } from "hono";
 import { z } from "zod";
+import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import type { Sql } from "postgres";
 import type { Clock } from "../../core/clock.ts";
 import { assertNever } from "../../core/assert.ts";
 import { err, ok, type Result } from "../../core/result.ts";
 import { AgentId, TenantId } from "../../ids.ts";
 import type { AgentId as AgentIdBrand, TenantId as TenantIdBrand } from "../../ids.ts";
-import { Attr, counter, emit, histogram } from "../../telemetry/otel.ts";
+import { Attr, SpanName, counter, emit, histogram, tracer } from "../../telemetry/otel.ts";
 import { writeEnvelope } from "../../trigger/envelope-ops.ts";
 import {
   MAX_MESSAGE_CONTENT_BYTES,
@@ -96,127 +97,162 @@ export type TriggerDeps = {
 export function triggerRoute(deps: TriggerDeps): Hono {
   const app = new Hono();
 
-  app.post("/trigger", async (c) => {
-    let raw: unknown;
-    try {
-      raw = await c.req.json();
-    } catch (e) {
-      if (!(e instanceof SyntaxError)) throw e;
-      return c.json(
-        {
-          error: {
-            kind: "validation_failed",
-            issues: [{ path: "", message: "invalid JSON body" }],
-          },
-        },
-        400,
-      );
-    }
+  app.post("/trigger", (c) => {
+    return tracer.startActiveSpan(
+      SpanName.HttpTriggerPost,
+      { kind: SpanKind.SERVER },
+      async (span) => {
+        try {
+          let raw: unknown;
+          try {
+            raw = await c.req.json();
+          } catch (e) {
+            if (!(e instanceof SyntaxError)) throw e;
+            span.recordException(e);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+            return c.json(
+              {
+                error: {
+                  kind: "validation_failed",
+                  issues: [{ path: "", message: "invalid JSON body" }],
+                },
+              },
+              400,
+            );
+          }
 
-    const parseResult = parseTriggerBody(raw);
-    if (!parseResult.ok) {
-      emit("INFO", "http.trigger.rejected", { kind: parseResult.error.kind });
-      return c.json({ error: parseResult.error }, triggerErrorStatus(parseResult.error));
-    }
-    const { tenantId, agentId, sender, content } = parseResult.value;
+          const parseResult = parseTriggerBody(raw);
+          if (!parseResult.ok) {
+            emit("INFO", "http.trigger.rejected", { kind: parseResult.error.kind });
+            span.setStatus({ code: SpanStatusCode.ERROR, message: parseResult.error.kind });
+            return c.json({ error: parseResult.error }, triggerErrorStatus(parseResult.error));
+          }
+          const { tenantId, agentId, sender, content } = parseResult.value;
 
-    const receivedAt = new Date(deps.clock.now());
-    const envelopePayload = {
-      kind: "message",
-      sender,
-      targetAgentId: agentId as string,
-      content,
-      receivedAt: receivedAt.toISOString(),
-    };
+          const receivedAt = new Date(deps.clock.now());
+          const envelopePayload = {
+            kind: "message",
+            sender,
+            targetAgentId: agentId as string,
+            content,
+            receivedAt: receivedAt.toISOString(),
+          };
 
-    const envelopeResult = await writeEnvelope(deps.sql, tenantId, "message", envelopePayload);
-    if (!envelopeResult.ok) {
-      emit("INFO", "http.trigger.rejected", { kind: envelopeResult.error.kind });
-      return c.json({ error: envelopeResult.error }, 400);
-    }
-    const envelopeId = envelopeResult.value;
+          const envelopeResult = await writeEnvelope(
+            deps.sql,
+            tenantId,
+            "message",
+            envelopePayload,
+          );
+          if (!envelopeResult.ok) {
+            emit("INFO", "http.trigger.rejected", { kind: envelopeResult.error.kind });
+            span.setStatus({ code: SpanStatusCode.ERROR, message: envelopeResult.error.kind });
+            return c.json({ error: envelopeResult.error }, 400);
+          }
+          const envelopeId = envelopeResult.value;
 
-    const registerResult = deps.registry.register(envelopeId);
-    if (!registerResult.ok) {
-      counter("http.trigger.sync_capacity_exhausted_total").add(1);
-      emit("INFO", "http.trigger.capacity_exhausted", { cap: registerResult.error.cap });
-      return c.json({ error: registerResult.error }, 503);
-    }
-    const deferred = registerResult.value;
+          const registerResult = deps.registry.register(envelopeId);
+          if (!registerResult.ok) {
+            counter("http.trigger.sync_capacity_exhausted_total").add(1);
+            emit("INFO", "http.trigger.capacity_exhausted", { cap: registerResult.error.cap });
+            span.setStatus({ code: SpanStatusCode.ERROR, message: registerResult.error.kind });
+            return c.json({ error: registerResult.error }, 503);
+          }
+          const deferred = registerResult.value;
 
-    const enqueueResult = await enqueue(deps.sql, {
-      tenantId,
-      kind: "session_start",
-      payloadRef: envelopeId,
-      scheduledAt: receivedAt,
-    });
-    if (!enqueueResult.ok) {
-      deps.registry.drop(envelopeId);
-      emit("INFO", "http.trigger.enqueue_failed", {
-        [Attr.TenantId]: tenantId,
-        detail: enqueueResult.error.kind,
-      });
-      return c.json({ error: { kind: "enqueue_failed", detail: enqueueResult.error.kind } }, 503);
-    }
+          const enqueueResult = await enqueue(deps.sql, {
+            tenantId,
+            kind: "session_start",
+            payloadRef: envelopeId,
+            scheduledAt: receivedAt,
+          });
+          if (!enqueueResult.ok) {
+            deps.registry.drop(envelopeId);
+            emit("INFO", "http.trigger.enqueue_failed", {
+              [Attr.TenantId]: tenantId,
+              detail: enqueueResult.error.kind,
+            });
+            span.setStatus({ code: SpanStatusCode.ERROR, message: enqueueResult.error.kind });
+            return c.json(
+              { error: { kind: "enqueue_failed", detail: enqueueResult.error.kind } },
+              503,
+            );
+          }
 
-    counter("http.trigger.received_total").add(1, { [Attr.TenantId]: tenantId });
-    emit("INFO", "http.trigger.enqueued", {
-      [Attr.EnvelopeId]: envelopeId,
-      [Attr.TenantId]: tenantId,
-    });
+          counter("http.trigger.received_total").add(1, { [Attr.TenantId]: tenantId });
+          emit("INFO", "http.trigger.enqueued", {
+            [Attr.EnvelopeId]: envelopeId,
+            [Attr.TenantId]: tenantId,
+          });
 
-    const startWaitMs = deps.clock.monotonic();
-    const ac = new AbortController();
-    const timeoutMs = deps.maxWaitMs ?? MAX_SYNC_WAIT_MS;
-    const timeoutP = new Promise<SyncOutcome>((resolve) => {
-      void deps.clock.sleep(timeoutMs, ac.signal).then(
-        () => {
-          resolve({ kind: "timeout", waitedMs: timeoutMs });
-        },
-        () => {
-          return undefined;
-        }, // aborted — deferred already resolved via ac.abort()
-      );
-    });
+          const startWaitMs = deps.clock.monotonic();
+          const ac = new AbortController();
+          const timeoutMs = deps.maxWaitMs ?? MAX_SYNC_WAIT_MS;
+          const timeoutP = new Promise<SyncOutcome>((resolve) => {
+            void deps.clock.sleep(timeoutMs, ac.signal).then(
+              () => {
+                resolve({ kind: "timeout", waitedMs: timeoutMs });
+              },
+              () => {
+                return undefined;
+              }, // aborted — deferred already resolved via ac.abort()
+            );
+          });
 
-    const outcome = await Promise.race([deferred, timeoutP]);
-    ac.abort();
-    deps.registry.drop(envelopeId); // idempotent — no-op if NOTIFY already resolved it
+          const outcome = await Promise.race([deferred, timeoutP]);
+          ac.abort();
+          deps.registry.drop(envelopeId); // idempotent — no-op if NOTIFY already resolved it
 
-    const elapsedMs = deps.clock.monotonic() - startWaitMs;
-    histogram("http.trigger.sync_wait_ms").record(elapsedMs, { [Attr.TenantId]: tenantId });
+          const elapsedMs = deps.clock.monotonic() - startWaitMs;
+          histogram("http.trigger.sync_wait_ms").record(elapsedMs, { [Attr.TenantId]: tenantId });
 
-    if (outcome.kind === "timeout") {
-      counter("http.trigger.timeout_total").add(1, { [Attr.TenantId]: tenantId });
-      emit("INFO", "http.trigger.timeout", {
-        [Attr.TenantId]: tenantId,
-        waited_ms: timeoutMs,
-      });
-      return c.json(
-        { session_id: null, error: { kind: "sync_wait_timeout", waited_ms: timeoutMs } },
-        504,
-      );
-    }
+          if (outcome.kind === "timeout") {
+            counter("http.trigger.timeout_total").add(1, { [Attr.TenantId]: tenantId });
+            emit("INFO", "http.trigger.timeout", {
+              [Attr.TenantId]: tenantId,
+              waited_ms: timeoutMs,
+            });
+            span.setStatus({ code: SpanStatusCode.ERROR, message: "sync_wait_timeout" });
+            return c.json(
+              { session_id: null, error: { kind: "sync_wait_timeout", waited_ms: timeoutMs } },
+              504,
+            );
+          }
 
-    const finalTurnResult = await readFinalTurnResponse(deps.sql, outcome.sessionId);
-    if (!finalTurnResult.ok) {
-      emit("WARN", "http.trigger.final_turn_missing", { [Attr.SessionId]: outcome.sessionId });
-      return c.json(
-        {
-          session_id: outcome.sessionId,
-          error: { kind: "session_failed", detail: finalTurnResult.error.kind },
-        },
-        500,
-      );
-    }
+          const finalTurnResult = await readFinalTurnResponse(deps.sql, outcome.sessionId);
+          if (!finalTurnResult.ok) {
+            emit("WARN", "http.trigger.final_turn_missing", {
+              [Attr.SessionId]: outcome.sessionId,
+            });
+            span.setStatus({ code: SpanStatusCode.ERROR, message: finalTurnResult.error.kind });
+            return c.json(
+              {
+                session_id: outcome.sessionId,
+                error: { kind: "session_failed", detail: finalTurnResult.error.kind },
+              },
+              500,
+            );
+          }
 
-    const { text, stopReason, usage } = finalTurnResult.value;
-    emit("INFO", "http.trigger.completed", {
-      [Attr.SessionId]: outcome.sessionId,
-      stop_reason: stopReason,
-      duration_ms: elapsedMs,
-    });
-    return c.json({ session_id: outcome.sessionId, text, stop_reason: stopReason, usage }, 200);
+          const { text, stopReason, usage } = finalTurnResult.value;
+          emit("INFO", "http.trigger.completed", {
+            [Attr.SessionId]: outcome.sessionId,
+            stop_reason: stopReason,
+            duration_ms: elapsedMs,
+          });
+          return c.json(
+            { session_id: outcome.sessionId, text, stop_reason: stopReason, usage },
+            200,
+          );
+        } catch (e) {
+          span.recordException(e as Error);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: (e as Error).message });
+          throw e;
+        } finally {
+          span.end();
+        }
+      },
+    );
   });
 
   return app;
