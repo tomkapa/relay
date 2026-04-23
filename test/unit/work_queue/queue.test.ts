@@ -4,6 +4,7 @@ import { TenantId } from "../../../src/ids.ts";
 import {
   MAX_DEQUEUE_BATCH,
   MAX_PAYLOAD_REF_LEN,
+  MAX_WORK_QUEUE_ROWS_PER_TENANT,
   MAX_WORKER_ID_LEN,
 } from "../../../src/work_queue/limits.ts";
 import {
@@ -13,6 +14,7 @@ import {
   WorkerId,
   type DequeueParams,
   type EnqueueParams,
+  type WorkQueueError,
   type WorkRow,
 } from "../../../src/work_queue/queue.ts";
 
@@ -154,6 +156,20 @@ describe("validateDequeue", () => {
   test("accepts a positive lease_ms", () => {
     const r = validateDequeue({ ...base, leaseMs: 1_000 });
     expect(r.ok).toBe(true);
+  });
+});
+
+describe("WorkQueueError — queue_over_capacity shape", () => {
+  test("queue_over_capacity carries tenantId and cap", () => {
+    const t = tenant();
+    const e: WorkQueueError = {
+      kind: "queue_over_capacity",
+      tenantId: t,
+      cap: MAX_WORK_QUEUE_ROWS_PER_TENANT,
+    };
+    expect(e.kind).toBe("queue_over_capacity");
+    expect(e.tenantId).toBe(t);
+    expect(e.cap).toBe(MAX_WORK_QUEUE_ROWS_PER_TENANT);
   });
 });
 

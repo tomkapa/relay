@@ -22,7 +22,8 @@ export type WorkQueueError =
   | { kind: "worker_id_too_long"; length: number; max: number }
   | { kind: "batch_out_of_range"; requested: number; min: number; max: number }
   | { kind: "lease_ms_non_positive"; leaseMs: number }
-  | { kind: "lease_not_held"; id: WorkItemId };
+  | { kind: "lease_not_held"; id: WorkItemId }
+  | { kind: "queue_over_capacity"; tenantId: TenantId; cap: number };
 
 export type WorkItem = {
   readonly id: WorkItemId;

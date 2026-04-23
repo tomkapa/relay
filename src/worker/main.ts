@@ -13,6 +13,7 @@ import { triggerHandlers } from "../trigger/handlers.ts";
 import { AnthropicModelClient } from "../session/model-anthropic.ts";
 import { InMemoryToolRegistry, echoTool } from "../session/tools-inmemory.ts";
 import { MAX_WORKER_ID_LEN } from "../work_queue/limits.ts";
+import { registerQueueGauges } from "../work_queue/observability.ts";
 import { WorkerId } from "../work_queue/queue.ts";
 import { DRAIN_TIMEOUT_MS } from "./limits.ts";
 import { makeWorkerQueue, runWorker } from "./worker.ts";
@@ -38,6 +39,7 @@ const tools = new InMemoryToolRegistry([echoTool]);
 
 const sql = connect({ url: DATABASE_URL, applicationName: "relay-worker" });
 const queue = makeWorkerQueue(sql);
+const disposeGauges = registerQueueGauges(sql);
 
 const ctrl = new AbortController();
 
@@ -62,5 +64,6 @@ await runWorker(
   ctrl.signal,
 );
 
+disposeGauges();
 await sql.end({ timeout: 5 });
 await shutdownTelemetry();

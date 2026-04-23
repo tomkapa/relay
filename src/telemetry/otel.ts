@@ -164,6 +164,13 @@ export function histogram(name: string, description?: string, unit?: string): Hi
   return h;
 }
 
+// Returns the active test meter when one is installed (via _setMeterForTest), otherwise the
+// module-level real meter. Observable gauge registrars call this at registration time so they
+// land on the same provider as synchronous instruments.
+export function getMeterForObservable(): Meter {
+  return _testMeter ?? meter;
+}
+
 // Install a test meter so instruments are created on a controllable provider.
 // Clears all cached handles so the first call after installation creates fresh instruments
 // on the test meter. Pass undefined to restore production (global OTel API) behavior.

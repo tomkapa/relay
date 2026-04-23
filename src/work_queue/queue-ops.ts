@@ -6,8 +6,8 @@ import type { Sql } from "postgres";
 import { assert } from "../core/assert.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { WorkItemId, mintId } from "../ids.ts";
-import { Attr, SpanName, withSpan } from "../telemetry/otel.ts";
-import { DEFAULT_LEASE_MS } from "./limits.ts";
+import { Attr, SpanName, counter, withSpan } from "../telemetry/otel.ts";
+import { DEFAULT_LEASE_MS, MAX_WORK_QUEUE_ROWS_PER_TENANT } from "./limits.ts";
 import {
   rowToItem,
   validateDequeue,
@@ -28,11 +28,35 @@ export async function enqueue(
   if (!v.ok) return v;
 
   const id = mintId(WorkItemId.parse, "enqueue");
+  const cap = MAX_WORK_QUEUE_ROWS_PER_TENANT;
 
-  await sql`
+  const rows = await sql<{ id: string }[]>`
+    WITH candidate AS (
+      SELECT ${id}::uuid          AS id,
+             ${params.tenantId}::uuid AS tenant_id,
+             ${params.kind}::text  AS kind,
+             ${params.payloadRef}::text AS payload_ref,
+             ${params.scheduledAt}::timestamptz AS scheduled_at
+    )
     INSERT INTO work_queue (id, tenant_id, kind, payload_ref, scheduled_at)
-    VALUES (${id}, ${params.tenantId}, ${params.kind}, ${params.payloadRef}, ${params.scheduledAt})
+    SELECT c.id, c.tenant_id, c.kind, c.payload_ref, c.scheduled_at
+    FROM candidate c
+    WHERE (
+      SELECT count(*) FROM work_queue
+      WHERE tenant_id = ${params.tenantId} AND completed_at IS NULL
+    ) < ${cap}
+    RETURNING id
   `;
+
+  if (rows.length === 0) {
+    counter(
+      "relay.work_queue.enqueue_rejected_total",
+      "Enqueue attempts rejected by capacity cap",
+    ).add(1, {
+      [Attr.TenantId]: params.tenantId,
+    });
+    return err({ kind: "queue_over_capacity", tenantId: params.tenantId, cap });
+  }
 
   return ok(id);
 }

@@ -20,3 +20,15 @@ export const MAX_WORKER_ID_LEN = 128;
 // a time; batch support is a natural generalization, but a hard cap prevents a caller
 // from hogging the dequeue round (CLAUDE.md §5 — every batch has a size cap).
 export const MAX_DEQUEUE_BATCH = 32;
+
+// Per-tenant cap on uncompleted work_queue rows. Safety backstop — not a plan-tiered
+// quota (that is future tech-debt). 10_000 is generous enough that a well-behaved
+// tenant will never hit it, tight enough that a runaway producer stops within one
+// screen of logs. Revisit when a real tenant approaches this number — the metric
+// added in RELAY-127 is the trigger.
+export const MAX_WORK_QUEUE_ROWS_PER_TENANT = 10_000;
+
+// Cap on tenants emitted by the observer per metric tick. Defends the backend
+// time-series store from a tenant-creation bug explosion. Not an operational limit
+// on tenants per cluster — that is a product decision elsewhere.
+export const MAX_TENANTS_OBSERVED_PER_TICK = 1_000;

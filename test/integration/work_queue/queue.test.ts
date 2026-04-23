@@ -5,14 +5,17 @@
 // Consumes INTEGRATION_DATABASE_URL (same contract as test/integration/db/migrate.test.ts).
 // Skipped when the env var is unset so `bun test` stays green on a machine without Docker.
 
-import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import postgres, { type Sql } from "postgres";
 import { randomUUID } from "node:crypto";
 import { assert } from "../../../src/core/assert.ts";
 import { TenantId, WorkItemId } from "../../../src/ids.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
 import { complete, dequeue, enqueue, release } from "../../../src/work_queue/queue-ops.ts";
+import { MAX_WORK_QUEUE_ROWS_PER_TENANT } from "../../../src/work_queue/limits.ts";
 import { WorkerId } from "../../../src/work_queue/queue.ts";
+import { installMetricFixture, sumCounter, uninstallMetricFixture } from "../../helpers/metrics.ts";
+import { Attr } from "../../../src/telemetry/otel.ts";
 import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
 
 let sqlRef: Sql | undefined;
@@ -417,6 +420,201 @@ describeOrSkip("work_queue (integration)", () => {
       const badBatch = await dequeue(sql, { workerId: w, limit: 0, now });
       expect(badBatch.ok).toBe(false);
       if (!badBatch.ok) expect(badBatch.error.kind).toBe("batch_out_of_range");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+});
+
+// Capacity cap tests use a small cap override to avoid inserting 10_000 rows in a test.
+// We swap the cap at the SQL level by inserting rows directly, then verify enqueue rejects.
+describeOrSkip("work_queue capacity cap (integration)", () => {
+  let metricFixture: ReturnType<typeof installMetricFixture>;
+
+  beforeEach(() => {
+    metricFixture = installMetricFixture();
+  });
+
+  afterEach(async () => {
+    await uninstallMetricFixture();
+  });
+
+  test(
+    "enqueue at cap returns queue_over_capacity with correct tenantId and cap fields",
+    async () => {
+      const sql = requireSql();
+      const t = tenant();
+      const now = new Date();
+      const cap = MAX_WORK_QUEUE_ROWS_PER_TENANT;
+
+      // Fill the tenant's queue to exactly cap rows by direct INSERT, bypassing enqueue
+      // so we don't call enqueue 10_000 times. We insert cap rows with uncompleted state.
+      const batchSize = 500;
+      const batches = Math.ceil(cap / batchSize);
+      for (let b = 0; b < batches; b++) {
+        const count = b < batches - 1 ? batchSize : cap - b * batchSize;
+        const rows = Array.from({ length: count }, (_, i) => ({
+          id: randomUUID(),
+          tenant_id: t,
+          kind: "task_fire",
+          payload_ref: `task:cap-test:${(b * batchSize + i).toString()}`,
+          scheduled_at: now,
+        }));
+        await sql`
+          INSERT INTO work_queue ${sql(rows, "id", "tenant_id", "kind", "payload_ref", "scheduled_at")}
+        `;
+      }
+
+      const over = await enqueue(sql, {
+        tenantId: t,
+        kind: "task_fire",
+        payloadRef: "task:over-cap",
+        scheduledAt: now,
+      });
+      expect(over.ok).toBe(false);
+      if (!over.ok) {
+        expect(over.error.kind).toBe("queue_over_capacity");
+        if (over.error.kind === "queue_over_capacity") {
+          expect(over.error.tenantId).toBe(t);
+          expect(over.error.cap).toBe(cap);
+        }
+      }
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "completing a row frees capacity for a subsequent enqueue",
+    async () => {
+      const sql = requireSql();
+      const t = tenant();
+      const w = worker("worker-cap-free");
+      const now = new Date();
+      const cap = MAX_WORK_QUEUE_ROWS_PER_TENANT;
+
+      // Fill to cap via direct INSERT
+      const batchSize = 500;
+      const batches = Math.ceil(cap / batchSize);
+      for (let b = 0; b < batches; b++) {
+        const count = b < batches - 1 ? batchSize : cap - b * batchSize;
+        const rows = Array.from({ length: count }, (_, i) => ({
+          id: randomUUID(),
+          tenant_id: t,
+          kind: "task_fire",
+          payload_ref: `task:free-test:${(b * batchSize + i).toString()}`,
+          scheduled_at: now,
+        }));
+        await sql`
+          INSERT INTO work_queue ${sql(rows, "id", "tenant_id", "kind", "payload_ref", "scheduled_at")}
+        `;
+      }
+
+      // Complete one row to free space
+      const dq = await dequeue(sql, { workerId: w, limit: 1, now });
+      expect(dq.ok).toBe(true);
+      if (!dq.ok) return;
+      const [item] = dq.value;
+      assert(item !== undefined, "test: expected one item from dequeue");
+      const done = await complete(sql, item.id, w);
+      expect(done.ok).toBe(true);
+
+      // Now enqueue should succeed
+      const after = await enqueue(sql, {
+        tenantId: t,
+        kind: "task_fire",
+        payloadRef: "task:after-free",
+        scheduledAt: now,
+      });
+      expect(after.ok).toBe(true);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "cap is per-tenant: filling tenant A does not block tenant B",
+    async () => {
+      const sql = requireSql();
+      const a = tenant();
+      const b = tenant();
+      const now = new Date();
+      const cap = MAX_WORK_QUEUE_ROWS_PER_TENANT;
+
+      // Fill tenant A to cap via direct INSERT
+      const batchSize = 500;
+      const batches = Math.ceil(cap / batchSize);
+      for (let i = 0; i < batches; i++) {
+        const count = i < batches - 1 ? batchSize : cap - i * batchSize;
+        const rows = Array.from({ length: count }, (_, j) => ({
+          id: randomUUID(),
+          tenant_id: a,
+          kind: "task_fire",
+          payload_ref: `task:isolation:${(i * batchSize + j).toString()}`,
+          scheduled_at: now,
+        }));
+        await sql`
+          INSERT INTO work_queue ${sql(rows, "id", "tenant_id", "kind", "payload_ref", "scheduled_at")}
+        `;
+      }
+
+      // Tenant A is at cap
+      const aOver = await enqueue(sql, {
+        tenantId: a,
+        kind: "task_fire",
+        payloadRef: "task:a-over",
+        scheduledAt: now,
+      });
+      expect(aOver.ok).toBe(false);
+      if (!aOver.ok) expect(aOver.error.kind).toBe("queue_over_capacity");
+
+      // Tenant B is unaffected
+      const bEnq = await enqueue(sql, {
+        tenantId: b,
+        kind: "task_fire",
+        payloadRef: "task:b-ok",
+        scheduledAt: now,
+      });
+      expect(bEnq.ok).toBe(true);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "rejected enqueue increments relay.work_queue.enqueue_rejected_total with tenant attribute",
+    async () => {
+      const sql = requireSql();
+      const t = tenant();
+      const now = new Date();
+      const cap = MAX_WORK_QUEUE_ROWS_PER_TENANT;
+
+      // Fill to cap via direct INSERT
+      const batchSize = 500;
+      const batches = Math.ceil(cap / batchSize);
+      for (let b = 0; b < batches; b++) {
+        const count = b < batches - 1 ? batchSize : cap - b * batchSize;
+        const rows = Array.from({ length: count }, (_, i) => ({
+          id: randomUUID(),
+          tenant_id: t,
+          kind: "task_fire",
+          payload_ref: `task:metric-test:${(b * batchSize + i).toString()}`,
+          scheduled_at: now,
+        }));
+        await sql`
+          INSERT INTO work_queue ${sql(rows, "id", "tenant_id", "kind", "payload_ref", "scheduled_at")}
+        `;
+      }
+
+      const r = await enqueue(sql, {
+        tenantId: t,
+        kind: "task_fire",
+        payloadRef: "task:metric-over",
+        scheduledAt: now,
+      });
+      expect(r.ok).toBe(false);
+
+      const rm = await metricFixture.collect();
+      const count = sumCounter(rm, "relay.work_queue.enqueue_rejected_total", {
+        [Attr.TenantId]: t,
+      });
+      expect(count).toBe(1);
     },
     HOOK_TIMEOUT_MS,
   );
