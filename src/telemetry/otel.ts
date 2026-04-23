@@ -66,7 +66,6 @@ export const Attr = {
   WorkId: "relay.work.id",
   WorkKind: "relay.work.kind",
   WorkerId: "relay.worker.id",
-  ProcessRole: "relay.process.role",
   ProcessPid: "relay.process.pid",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];

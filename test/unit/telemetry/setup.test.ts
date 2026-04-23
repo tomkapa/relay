@@ -5,15 +5,10 @@
 // constructed. That is the invariant we care about most: tests must never boot the
 // real SDK (CLAUDE.md §3 — tests do not hit real telemetry backends).
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
 import { AssertionError } from "../../../src/core/assert.ts";
-import {
-  buildResource,
-  markRole,
-  shouldBoot,
-  shutdownTelemetry,
-} from "../../../src/telemetry/setup.ts";
+import { buildResource, shouldBoot, shutdownTelemetry } from "../../../src/telemetry/setup.ts";
 
 describe("shouldBoot", () => {
   const originalNodeEnv = process.env["NODE_ENV"];
@@ -79,26 +74,5 @@ describe("shutdownTelemetry", () => {
   test("is a no-op and safe to call repeatedly when SDK was never booted", async () => {
     await shutdownTelemetry();
     await shutdownTelemetry();
-  });
-});
-
-describe("markRole", () => {
-  // With NODE_ENV=test the global meter provider is the no-op provider. The counter
-  // call therefore has no observable side effect — we only assert the function does
-  // not throw and accepts the expected role values.
-  beforeEach(() => {
-    // No setup — the module-top-level boot() has already run as a no-op.
-  });
-
-  test("accepts the worker role without throwing", () => {
-    expect(() => {
-      markRole("worker");
-    }).not.toThrow();
-  });
-
-  test("accepts the api role without throwing", () => {
-    expect(() => {
-      markRole("api");
-    }).not.toThrow();
   });
 });

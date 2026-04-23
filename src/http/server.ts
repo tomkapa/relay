@@ -2,15 +2,13 @@
 // This file is an entrypoint — not imported by tests. Tests use makeApp directly.
 
 // MUST be first: patches modules at require-time; anything imported earlier is un-instrumented.
-import { markRole, shutdownTelemetry } from "../telemetry/setup.ts";
+import { shutdownTelemetry } from "../telemetry/setup.ts";
 
 import { assert } from "../core/assert.ts";
 import { realClock } from "../core/clock.ts";
 import { connect } from "../db/client.ts";
 import { makeApp } from "./app.ts";
 import { DEFAULT_PORT, PORT_MAX, PORT_MIN } from "./limits.ts";
-
-markRole("api");
 
 const DATABASE_URL = process.env["DATABASE_URL"];
 assert(DATABASE_URL !== undefined && DATABASE_URL.length > 0, "server: DATABASE_URL must be set");

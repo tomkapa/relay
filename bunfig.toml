@@ -14,6 +14,10 @@ coveragePathIgnorePatterns = [
   "test/**",
   "src/db/migrate-apply.ts",
   "src/telemetry/otel.ts",
+  # OTel NodeSDK bootstrap — boot() and real sdk.shutdown() paths only run when
+  # NODE_ENV != "test" (CLAUDE §3: tests never hit a real telemetry backend).
+  # Pure helpers (shouldBoot, buildResource, shutdownTelemetry no-op) are unit-tested.
+  "src/telemetry/setup.ts",
   "src/work_queue/queue-ops.ts",
   # Agent creation domain function — DB shell, covered by test/integration/agent/create.test.ts.
   "src/agent/create.ts",

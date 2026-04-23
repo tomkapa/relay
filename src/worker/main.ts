@@ -3,7 +3,7 @@
 // not imported by tests. Tests exercise runWorker directly.
 
 // MUST be first: patches modules at require-time; anything imported earlier is un-instrumented.
-import { markRole, shutdownTelemetry } from "../telemetry/setup.ts";
+import { shutdownTelemetry } from "../telemetry/setup.ts";
 
 import { hostname } from "node:os";
 import { assert } from "../core/assert.ts";
@@ -14,8 +14,6 @@ import { MAX_WORKER_ID_LEN } from "../work_queue/limits.ts";
 import { WorkerId } from "../work_queue/queue.ts";
 import { DRAIN_TIMEOUT_MS } from "./limits.ts";
 import { makeWorkerQueue, runWorker } from "./worker.ts";
-
-markRole("worker");
 
 const DATABASE_URL = process.env["DATABASE_URL"];
 assert(DATABASE_URL !== undefined && DATABASE_URL.length > 0, "worker: DATABASE_URL must be set");

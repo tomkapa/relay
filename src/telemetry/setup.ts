@@ -102,15 +102,10 @@ function boot(): void {
 
   sdk.start();
 
-  // The role-tagged counter is stamped via markRole() from each entrypoint — static
-  // import order prevents us from doing it here (the role is only known to the entrypoint).
+  // Process-boot signal. service.name / service.instance.id on the Resource already
+  // identify which service and replica booted, so no attributes are needed here.
+  counter("relay.process.start_total", "Process boot counter — one per start").add(1);
   emit("INFO", "telemetry.bootstrapped", { [Attr.ProcessPid]: process.pid });
-}
-
-export function markRole(role: "worker" | "api"): void {
-  counter("relay.process.start_total", "Process boot counter — one per start").add(1, {
-    [Attr.ProcessRole]: role,
-  });
 }
 
 export async function shutdownTelemetry(): Promise<void> {
