@@ -41,6 +41,7 @@ export const SpanName = {
   WorkerPick: "worker.pick",
   WorkerTick: "worker.tick",
   WorkerHandle: "worker.handle",
+  SessionClose: "session.close",
 } as const;
 export type SpanName = (typeof SpanName)[keyof typeof SpanName];
 
@@ -67,6 +68,8 @@ export const Attr = {
   WorkKind: "relay.work.kind",
   WorkerId: "relay.worker.id",
   ProcessPid: "relay.process.pid",
+  SessionCloseReason: "relay.session.close_reason",
+  HookReason: "relay.hook.reason",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 
