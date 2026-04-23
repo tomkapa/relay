@@ -19,16 +19,23 @@ coveragePathIgnorePatterns = [
   # Pure helpers (shouldBoot, buildResource, shutdownTelemetry no-op) are unit-tested.
   "src/telemetry/setup.ts",
   "src/work_queue/queue-ops.ts",
+  # Queue observer — DB shell (ObservableGauge callback runs against real Postgres),
+  # covered by test/integration/work_queue/observer.test.ts.
+  "src/work_queue/observability.ts",
   # Agent creation domain function — DB shell, covered by test/integration/agent/create.test.ts.
   "src/agent/create.ts",
   # Agent load — DB shell, covered by test/integration/trigger/handlers.test.ts.
   "src/agent/load.ts",
   # Session creation — DB shell, covered by test/integration/trigger/handlers.test.ts.
   "src/session/create.ts",
+  # Session load-open — DB shell, covered by test/integration/session/turn-loop.test.ts.
+  "src/session/load-open.ts",
   # Trigger envelope DB ops — covered by test/integration/trigger/handlers.test.ts.
   "src/trigger/envelope-ops.ts",
   # Trigger handlers — DB-dependent shell, covered by test/integration/trigger/handlers.test.ts.
   "src/trigger/handlers.ts",
+  # Inbound ops — DB shell, covered by test/integration/trigger/handlers.test.ts.
+  "src/trigger/inbound/inbound-ops.ts",
   # HTTP layer — exercised end-to-end by test/integration/http/agents.test.ts with real Postgres.
   "src/http/app.ts",
   "src/http/routes/agents.ts",
