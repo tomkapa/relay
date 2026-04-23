@@ -5,13 +5,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { assert } from "../core/assert.ts";
 import type { ModelClient, ToolSchema } from "./model.ts";
-import type {
-  ContentBlock,
-  Message,
-  ModelResponse,
-  ModelUsage,
-  StopReason,
-} from "./turn.ts";
+import type { ContentBlock, Message, ModelResponse, ModelUsage, StopReason } from "./turn.ts";
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20251022";
 const DEFAULT_MAX_TOKENS = 4096;
