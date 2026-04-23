@@ -1,6 +1,9 @@
 // Bun.serve entrypoint. Reads PORT from env, validates it, starts the HTTP server.
 // This file is an entrypoint — not imported by tests. Tests use makeApp directly.
 
+// MUST be first: patches modules at require-time; anything imported earlier is un-instrumented.
+import { shutdownTelemetry } from "../telemetry/setup.ts";
+
 import { assert } from "../core/assert.ts";
 import { realClock } from "../core/clock.ts";
 import { connect } from "../db/client.ts";
@@ -26,10 +29,15 @@ const server = Bun.serve({
   fetch: app.fetch.bind(app),
 });
 
-// Drain the connection pool on shutdown.
+// Drain the connection pool on shutdown. Telemetry last so the drain itself is instrumented.
+async function shutdown(): Promise<void> {
+  await server.stop();
+  await sql.end({ timeout: 5 });
+  await shutdownTelemetry();
+}
+
 process.on("SIGTERM", () => {
-  void server.stop();
-  void sql.end({ timeout: 5 });
+  void shutdown();
 });
 
 export { server };

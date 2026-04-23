@@ -2,6 +2,9 @@
 // and runs the worker loop until SIGTERM / SIGINT. This file is an entrypoint —
 // not imported by tests. Tests exercise runWorker directly.
 
+// MUST be first: patches modules at require-time; anything imported earlier is un-instrumented.
+import { shutdownTelemetry } from "../telemetry/setup.ts";
+
 import { hostname } from "node:os";
 import { assert } from "../core/assert.ts";
 import { realClock } from "../core/clock.ts";
@@ -49,3 +52,4 @@ await runWorker(
 );
 
 await sql.end({ timeout: 5 });
+await shutdownTelemetry();
