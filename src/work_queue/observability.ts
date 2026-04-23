@@ -4,6 +4,9 @@
 
 import type { BatchObservableResult } from "@opentelemetry/api";
 import type { Sql } from "postgres";
+import type { Clock } from "../core/clock.ts";
+import { TenantId } from "../ids.ts";
+import type { TenantId as TenantIdBrand } from "../ids.ts";
 import { Attr, emit, getMeterForObservable } from "../telemetry/otel.ts";
 import { MAX_TENANTS_OBSERVED_PER_TICK } from "./limits.ts";
 
@@ -13,7 +16,27 @@ type QueueRow = {
   readonly oldest_age_seconds: string;
 };
 
-export function registerQueueGauges(sql: Sql): () => void {
+type ParsedQueueRow = {
+  readonly tenantId: TenantIdBrand;
+  readonly depth: number;
+  readonly oldestAgeSeconds: number;
+};
+
+// Parse one DB row into branded/validated form. Returns null for malformed rows so the
+// caller can WARN and drop the sample rather than crash the meter tick (CLAUDE §1 — parse
+// at boundary; soft-fail chosen here because this IS the observability path — an assert
+// would blank every tenant's metrics on a single bad row).
+function parseQueueRow(r: QueueRow): ParsedQueueRow | null {
+  const tid = TenantId.parse(r.tenant_id);
+  if (!tid.ok) return null;
+  const depth = Number(r.depth);
+  if (!Number.isFinite(depth) || depth < 0) return null;
+  const age = Number(r.oldest_age_seconds);
+  if (!Number.isFinite(age) || age < 0) return null;
+  return { tenantId: tid.value, depth, oldestAgeSeconds: age };
+}
+
+export function registerQueueGauges(sql: Sql, clock: Clock): () => void {
   const m = getMeterForObservable();
   const depth = m.createObservableGauge("relay.work_queue.depth", {
     description: "Uncompleted work_queue rows, per tenant",
@@ -25,36 +48,55 @@ export function registerQueueGauges(sql: Sql): () => void {
   });
 
   const callback = async (result: BatchObservableResult): Promise<void> => {
-    let rows: QueueRow[] = Array.from(
-      await sql<QueueRow[]>`
+    // Single reference time per tick — matches dequeue's `params.now` semantics so the
+    // gauge reports rows by the same definition of "ready" the worker would pick up
+    // (CLAUDE §11 — production code takes a Clock, not the DB's wall clock).
+    const now = new Date(clock.now());
+    const raw = await sql<QueueRow[]>`
         SELECT
           tenant_id,
           count(*)::bigint AS depth,
           COALESCE(
-            EXTRACT(EPOCH FROM (now() - min(scheduled_at) FILTER (WHERE scheduled_at <= now()))),
+            EXTRACT(
+              EPOCH FROM
+              (${now}::timestamptz - min(scheduled_at) FILTER (WHERE scheduled_at <= ${now}::timestamptz))
+            ),
             0
           )::numeric AS oldest_age_seconds
         FROM work_queue
         WHERE completed_at IS NULL
         GROUP BY tenant_id
-      `,
-    );
+      `;
 
-    if (rows.length > MAX_TENANTS_OBSERVED_PER_TICK) {
+    let parsed: ParsedQueueRow[] = [];
+    for (const r of raw) {
+      const p = parseQueueRow(r);
+      if (p === null) {
+        emit("WARN", "work_queue.observer.invalid_row", {
+          "relay.tenant_id_raw": r.tenant_id,
+          "relay.depth_raw": r.depth,
+          "relay.oldest_age_seconds_raw": r.oldest_age_seconds,
+        });
+        continue;
+      }
+      parsed.push(p);
+    }
+
+    if (parsed.length > MAX_TENANTS_OBSERVED_PER_TICK) {
       emit("ERROR", "work_queue.observer.cardinality_overflow", {
-        "relay.observed": rows.length,
+        "relay.observed": parsed.length,
         "relay.max": MAX_TENANTS_OBSERVED_PER_TICK,
       });
-      rows = rows
+      parsed = parsed
         .slice()
-        .sort((a, b) => Number(b.depth) - Number(a.depth))
+        .sort((a, b) => b.depth - a.depth)
         .slice(0, MAX_TENANTS_OBSERVED_PER_TICK);
     }
 
-    for (const r of rows) {
-      const attrs = { [Attr.TenantId]: r.tenant_id };
-      result.observe(depth, Number(r.depth), attrs);
-      result.observe(age, Number(r.oldest_age_seconds), attrs);
+    for (const r of parsed) {
+      const attrs = { [Attr.TenantId]: r.tenantId };
+      result.observe(depth, r.depth, attrs);
+      result.observe(age, r.oldestAgeSeconds, attrs);
     }
   };
 

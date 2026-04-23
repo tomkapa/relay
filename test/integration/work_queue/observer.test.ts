@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:te
 import postgres, { type Sql } from "postgres";
 import { randomUUID } from "node:crypto";
 import { assert } from "../../../src/core/assert.ts";
+import { realClock } from "../../../src/core/clock.ts";
 import { TenantId } from "../../../src/ids.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
 import { Attr } from "../../../src/telemetry/otel.ts";
@@ -105,7 +106,7 @@ describeOrSkip("work_queue observer (integration)", () => {
         INSERT INTO work_queue ${sql(rows, "id", "tenant_id", "kind", "payload_ref", "scheduled_at")}
       `;
 
-      dispose = registerQueueGauges(sql);
+      dispose = registerQueueGauges(sql, realClock);
       const rm = await fixture.collect();
       const depths = observationsForTenant(rm, "relay.work_queue.depth", t);
       expect(depths).toHaveLength(1);
@@ -132,7 +133,7 @@ describeOrSkip("work_queue observer (integration)", () => {
         )
       `;
 
-      dispose = registerQueueGauges(sql);
+      dispose = registerQueueGauges(sql, realClock);
       const rm = await fixture.collect();
       const ages = observationsForTenant(rm, "relay.work_queue.oldest_ready_age_seconds", t);
       expect(ages).toHaveLength(1);
@@ -161,7 +162,7 @@ describeOrSkip("work_queue observer (integration)", () => {
         )
       `;
 
-      dispose = registerQueueGauges(sql);
+      dispose = registerQueueGauges(sql, realClock);
       const rm = await fixture.collect();
 
       // Depth = 1 (the row is uncompleted)
@@ -183,7 +184,7 @@ describeOrSkip("work_queue observer (integration)", () => {
       const sql = requireSql();
       const t = tenant();
 
-      dispose = registerQueueGauges(sql);
+      dispose = registerQueueGauges(sql, realClock);
       const rm = await fixture.collect();
 
       const depths = observationsForTenant(rm, "relay.work_queue.depth", t);

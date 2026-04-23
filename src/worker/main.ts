@@ -39,7 +39,7 @@ const tools = new InMemoryToolRegistry([echoTool]);
 
 const sql = connect({ url: DATABASE_URL, applicationName: "relay-worker" });
 const queue = makeWorkerQueue(sql);
-const disposeGauges = registerQueueGauges(sql);
+const disposeGauges = registerQueueGauges(sql, realClock);
 
 const ctrl = new AbortController();
 
