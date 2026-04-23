@@ -324,8 +324,8 @@ describe("saturation counters — turn loop", () => {
     ids = makeIds();
   });
 
-  afterEach(() => {
-    uninstallMetricFixture();
+  afterEach(async () => {
+    await uninstallMetricFixture();
   });
 
   test("2-turn happy path: iteration_total=2, completion_total=1 {outcome=end_turn}", async () => {
@@ -405,8 +405,8 @@ describe("saturation counters — tool dispatch", () => {
     ids = makeIds();
   });
 
-  afterEach(() => {
-    uninstallMetricFixture();
+  afterEach(async () => {
+    await uninstallMetricFixture();
   });
 
   test("two tool_use blocks: dispatch_iteration_total=2, two {outcome=invoked}", async () => {

@@ -9,10 +9,10 @@ import { FakeClock } from "../../../src/core/clock.ts";
 import { err, ok, type Result } from "../../../src/core/result.ts";
 import type { WorkItemId } from "../../../src/ids.ts";
 import { WorkItemId as WorkItemIdParser, TenantId } from "../../../src/ids.ts";
-import type {
-  WorkItem,
-  WorkKind,
-  WorkQueueError,
+import {
+  type WorkItem,
+  type WorkKind,
+  type WorkQueueError,
   WorkerId,
 } from "../../../src/work_queue/queue.ts";
 import type { Dispatcher, HandlerError } from "../../../src/worker/dispatcher.ts";
@@ -822,7 +822,9 @@ describe("runWorker", () => {
 
 describe("saturation counters — worker tick", () => {
   let fixture: MetricFixture;
-  const WORKER_ID = "counter-test-worker" as WorkerId;
+  const workerIdResult = WorkerId.parse("counter-test-worker");
+  if (!workerIdResult.ok) throw new Error("counter-test-worker: invalid WorkerId");
+  const WORKER_ID = workerIdResult.value;
 
   beforeEach(() => {
     fixture = installMetricFixture();
@@ -830,8 +832,8 @@ describe("saturation counters — worker tick", () => {
     ctrl = new AbortController();
   });
 
-  afterEach(() => {
-    uninstallMetricFixture();
+  afterEach(async () => {
+    await uninstallMetricFixture();
   });
 
   test("3 idle polls then abort: iteration_total=3, completion_total=3 {outcome=idle}", async () => {

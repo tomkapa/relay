@@ -20,6 +20,8 @@ export type MetricFixture = {
   collect: () => Promise<ResourceMetrics>;
 };
 
+let _activeProvider: MeterProvider | undefined;
+
 export function installMetricFixture(): MetricFixture {
   const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
   const reader = new PeriodicExportingMetricReader({
@@ -27,6 +29,7 @@ export function installMetricFixture(): MetricFixture {
     exportIntervalMillis: 999_999_999,
   });
   const provider = new MeterProvider({ readers: [reader] });
+  _activeProvider = provider;
   const testMeter = provider.getMeter(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
   _setMeterForTest(testMeter);
   return {
@@ -38,8 +41,12 @@ export function installMetricFixture(): MetricFixture {
   };
 }
 
-export function uninstallMetricFixture(): void {
+export async function uninstallMetricFixture(): Promise<void> {
   _setMeterForTest(undefined);
+  if (_activeProvider !== undefined) {
+    await _activeProvider.shutdown();
+    _activeProvider = undefined;
+  }
 }
 
 // Sum a named counter across all data points, optionally filtered by attribute values.

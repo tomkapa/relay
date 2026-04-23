@@ -325,8 +325,9 @@ function outcomeFromTurnLoopError(e: TurnLoopError): string {
       return "model_error";
     case "tool_invocation_failed":
     case "tool_unknown":
-    case "timeout":
       return "tool_error";
+    case "timeout":
+      return e.stage === "model" ? "model_error" : "tool_error";
     case "turn_cap_exceeded":
       return "cap_exceeded";
     case "persist_turn_failed":
