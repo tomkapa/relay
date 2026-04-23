@@ -5,15 +5,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { assert } from "../core/assert.ts";
 import type { ModelClient, ToolSchema } from "./model.ts";
-import type {
-  ContentBlock,
-  Message,
-  ModelResponse,
-  ModelUsage,
-  StopReason,
-  TextBlock,
-  ToolUseBlock,
-} from "./turn.ts";
+import type { ContentBlock, Message, ModelResponse, ModelUsage, StopReason } from "./turn.ts";
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20251022";
 const DEFAULT_MAX_TOKENS = 4096;
@@ -126,10 +118,15 @@ export class AnthropicModelClient implements ModelClient {
     assert(response.stop_reason !== null, "AnthropicModelClient: stop_reason is null");
     const stopReason = response.stop_reason satisfies StopReason;
 
-    // Anthropic never returns tool_result blocks in assistant content, but filter defensively.
+    // Filter to known block types before mapping — third-party proxies and newer models
+    // (e.g. thinking-enabled) may return additional block types (thinking, redacted_thinking).
+    // Filtering first prevents fromAnthropicContentBlock from asserting on unknown types.
     const content = response.content
-      .map(fromAnthropicContentBlock)
-      .filter((b): b is TextBlock | ToolUseBlock => b.type === "text" || b.type === "tool_use");
+      .filter(
+        (b): b is Anthropic.TextBlock | Anthropic.ToolUseBlock =>
+          b.type === "text" || b.type === "tool_use",
+      )
+      .map(fromAnthropicContentBlock);
 
     return { content, stopReason, usage: fromAnthropicUsage(response.usage) };
   }

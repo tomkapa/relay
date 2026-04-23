@@ -14,11 +14,9 @@ import { hostname } from "node:os";
 
 import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
-import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { Resource } from "@opentelemetry/resources";
+import { Resource, envDetector, hostDetector } from "@opentelemetry/resources";
 import { BatchLogRecordProcessor } from "@opentelemetry/sdk-logs";
-import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import {
@@ -30,7 +28,6 @@ import {
 import { assert } from "../core/assert.ts";
 import {
   LOG_EXPORT_INTERVAL_MS,
-  METRIC_EXPORT_INTERVAL_MS,
   TELEMETRY_SHUTDOWN_MS,
   TRACE_EXPORT_INTERVAL_MS,
 } from "./limits.ts";
@@ -75,15 +72,12 @@ function boot(): void {
 
   sdk = new NodeSDK({
     resource: buildResource(),
+    resourceDetectors: [envDetector, hostDetector],
     spanProcessors: [
       new BatchSpanProcessor(new OTLPTraceExporter(), {
         scheduledDelayMillis: TRACE_EXPORT_INTERVAL_MS,
       }),
     ],
-    metricReader: new PeriodicExportingMetricReader({
-      exporter: new OTLPMetricExporter(),
-      exportIntervalMillis: METRIC_EXPORT_INTERVAL_MS,
-    }),
     logRecordProcessors: [
       new BatchLogRecordProcessor(new OTLPLogExporter(), {
         scheduledDelayMillis: LOG_EXPORT_INTERVAL_MS,

@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:e2e": "playwright test",
+    "db:migrate": "bun run src/db/migrate-main.ts",
     "check": "bun run lint && bun run fmt:check && bun run typecheck && bun test"
   },
   "dependencies": {
