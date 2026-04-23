@@ -9,6 +9,8 @@ import { firstRow } from "../db/utils.ts";
 import { TenantId, type AgentId, type SessionId, type TenantId as TenantIdBrand } from "../ids.ts";
 import { Attr, SpanName, counter, emit, histogram, withSpan } from "../telemetry/otel.ts";
 
+export type SyncCloseReason = SessionEndReason["kind"];
+
 // Close reason tags. Additive union — future tasks (abandoned-after-deadline, admin-force-close)
 // extend here. RELAY-93 adds nothing: suspend is NOT a close.
 export type SessionEndReason =
@@ -78,9 +80,11 @@ export async function closeSession(
           readonly tenant_id: string;
           readonly closed_at: Date | null;
           readonly created_at: Date;
+          readonly envelope_id: string | null;
         }[]
       >`
-        SELECT tenant_id, closed_at, created_at
+        SELECT tenant_id, closed_at, created_at,
+               originating_trigger->>'envelopeId' AS envelope_id
         FROM sessions
         WHERE id = ${spec.sessionId}
       `;
@@ -110,6 +114,12 @@ export async function closeSession(
       // Fires after commit so RELAY-37 audit counts align with the closed_total counter.
       // A deny does not unwind the close — the loop has already returned; nothing to roll back.
       if (outcome.kind === "closed") {
+        await emitSessionSyncClose(sql, {
+          sessionId: spec.sessionId,
+          reason: spec.reason.kind,
+          envelopeId: row.envelope_id,
+        });
+
         const hook = await hookFn({
           sessionId: spec.sessionId,
           tenantId: spec.tenantId,
@@ -139,6 +149,38 @@ export async function closeSession(
       return ok(outcome);
     },
   );
+}
+
+// Reads originating_trigger->>'envelopeId'. If present, emits a Postgres NOTIFY so the
+// HTTP server process can resolve its sync waiter. Sessions created without an envelope
+// (task_fire, ask-reply) have a null envelopeId and are silently skipped.
+// Errors are caught and logged — a notify failure must NOT unwind the close.
+export async function emitSessionSyncClose(
+  sql: Sql,
+  spec: {
+    readonly sessionId: SessionId;
+    readonly reason: SyncCloseReason;
+    readonly envelopeId: string | null;
+  },
+): Promise<void> {
+  if (spec.envelopeId === null) return;
+
+  const payload = JSON.stringify({
+    envelopeId: spec.envelopeId,
+    sessionId: spec.sessionId as string,
+    reason: spec.reason,
+  });
+
+  try {
+    await withSpan(SpanName.SessionSyncDispatch, { [Attr.SessionId]: spec.sessionId }, async () => {
+      await sql.notify("session_sync_close", payload);
+    });
+  } catch (e) {
+    emit("WARN", "session.sync_close.notify_failed", {
+      [Attr.SessionId]: spec.sessionId,
+      error: (e as Error).message,
+    });
+  }
 }
 
 // Returns false for missing sessions — callers that need to distinguish "not-found" from "open"

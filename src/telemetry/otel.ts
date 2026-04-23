@@ -42,6 +42,8 @@ export const SpanName = {
   WorkerTick: "worker.tick",
   WorkerHandle: "worker.handle",
   SessionClose: "session.close",
+  SessionSyncDispatch: "session.sync.dispatch",
+  HttpTriggerPost: "http.trigger.post",
 } as const;
 export type SpanName = (typeof SpanName)[keyof typeof SpanName];
 
@@ -73,6 +75,7 @@ export const Attr = {
   TurnLoopOutcome: "relay.turn_loop.outcome",
   TurnsCount: "relay.turns.count",
   Outcome: "relay.outcome",
+  EnvelopeId: "relay.envelope.id",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 

@@ -13,6 +13,7 @@ import {
 import type { AgentId, SessionId, TenantId } from "../../../src/ids.ts";
 import {
   closeSession,
+  emitSessionSyncClose,
   isClosed,
   type HookResult,
   type SessionEndPayload,
@@ -51,7 +52,14 @@ describe("closeSession", () => {
     const { sessionId, agentId, tenantId } = ids;
     const nowMs = clock.now();
     const sql = makeFakeSql([
-      [{ tenant_id: tenantId, closed_at: null, created_at: new Date(1_000_000) }],
+      [
+        {
+          tenant_id: tenantId,
+          closed_at: null,
+          created_at: new Date(1_000_000),
+          envelope_id: null,
+        },
+      ],
       [{ closed_at: new Date(nowMs) }],
     ]);
 
@@ -135,7 +143,14 @@ describe("closeSession", () => {
     const { sessionId, agentId, tenantId } = ids;
     const nowMs = clock.now();
     const sql = makeFakeSql([
-      [{ tenant_id: tenantId, closed_at: null, created_at: new Date(1_000_000) }],
+      [
+        {
+          tenant_id: tenantId,
+          closed_at: null,
+          created_at: new Date(1_000_000),
+          envelope_id: null,
+        },
+      ],
       [{ closed_at: new Date(nowMs) }],
     ]);
     const denyHook: (payload: SessionEndPayload) => Promise<HookResult> = () =>
@@ -179,7 +194,14 @@ describe("closeSession", () => {
     const { sessionId, agentId, tenantId } = ids;
     const nowMs = clock.now();
     const sql = makeFakeSql([
-      [{ tenant_id: tenantId, closed_at: null, created_at: new Date(1_000_000) }],
+      [
+        {
+          tenant_id: tenantId,
+          closed_at: null,
+          created_at: new Date(1_000_000),
+          envelope_id: null,
+        },
+      ],
       [{ closed_at: new Date(nowMs) }],
     ]);
 
@@ -208,6 +230,52 @@ describe("closeSession", () => {
         reason: { kind: "end_turn" },
       }),
     ).toThrow(AssertionError);
+  });
+});
+
+describe("emitSessionSyncClose", () => {
+  test("no-op when envelopeId is null", async () => {
+    const { sessionId } = ids;
+    let notifyCalled = false;
+    const sql = makeFakeSql([]);
+    (sql as unknown as Record<string, unknown>)["notify"] = () => {
+      notifyCalled = true;
+      return Promise.resolve();
+    };
+    await emitSessionSyncClose(sql, { sessionId, reason: "end_turn", envelopeId: null });
+    expect(notifyCalled).toBe(false);
+  });
+
+  test("closeSession outcome is still 'closed' even when notify fails", async () => {
+    const { sessionId, agentId, tenantId } = ids;
+    const nowMs = clock.now();
+    // closeSession now fetches envelopeId in the same lookup query.
+    const sql = makeFakeSql([
+      [
+        {
+          tenant_id: tenantId,
+          closed_at: null,
+          created_at: new Date(1_000_000),
+          envelope_id: "00000000-0000-4000-8000-000000000001",
+        },
+      ],
+      [{ closed_at: new Date(nowMs) }],
+    ]);
+    // sql.notify throws to simulate failure — close must still succeed.
+    (sql as unknown as Record<string, unknown>)["notify"] = () => {
+      throw new Error("notify connection error");
+    };
+
+    const result = await closeSession(sql, clock, {
+      sessionId,
+      agentId,
+      tenantId,
+      reason: { kind: "end_turn" },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.kind).toBe("closed");
   });
 });
 

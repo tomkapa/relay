@@ -6,9 +6,11 @@ import { bodyLimit } from "hono/body-limit";
 import type { Sql } from "postgres";
 import type { Clock } from "../core/clock.ts";
 import { MAX_REQUEST_BYTES } from "./limits.ts";
+import type { ReplyRegistry } from "./reply-registry.ts";
 import { agentsRoute } from "./routes/agents.ts";
+import { triggerRoute } from "./routes/trigger.ts";
 
-export type AppDeps = { sql: Sql; clock: Clock };
+export type AppDeps = { sql: Sql; clock: Clock; registry: ReplyRegistry };
 
 export function makeApp(deps: AppDeps): Hono {
   const app = new Hono();
@@ -22,6 +24,7 @@ export function makeApp(deps: AppDeps): Hono {
   );
 
   app.route("/", agentsRoute(deps));
+  app.route("/", triggerRoute(deps));
 
   return app;
 }
