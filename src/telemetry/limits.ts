@@ -10,10 +10,6 @@ export const TELEMETRY_SHUTDOWN_MS = 5_000;
 // backend write amplification.
 export const TRACE_EXPORT_INTERVAL_MS = 5_000;
 
-// Metric reader interval. Metrics are low-cardinality aggregates; 30s is the SDK default
-// and the right break-even for OTLP backends priced on ingest events.
-export const METRIC_EXPORT_INTERVAL_MS = 30_000;
-
 // Log BatchLogRecordProcessor interval. Matches TRACE_EXPORT_INTERVAL_MS so trace↔log
 // correlation in the debugging workflow is tight.
 export const LOG_EXPORT_INTERVAL_MS = 5_000;
