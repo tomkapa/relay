@@ -70,6 +70,8 @@ export const Attr = {
   ProcessPid: "relay.process.pid",
   SessionCloseReason: "relay.session.close_reason",
   HookReason: "relay.hook.reason",
+  TurnLoopOutcome: "relay.turn_loop.outcome",
+  TurnsCount: "relay.turns.count",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 

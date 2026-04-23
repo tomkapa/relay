@@ -10,6 +10,8 @@ import { assert } from "../core/assert.ts";
 import { realClock } from "../core/clock.ts";
 import { connect } from "../db/client.ts";
 import { triggerHandlers } from "../trigger/handlers.ts";
+import { AnthropicModelClient } from "../session/model-anthropic.ts";
+import { InMemoryToolRegistry, echoTool } from "../session/tools-inmemory.ts";
 import { MAX_WORKER_ID_LEN } from "../work_queue/limits.ts";
 import { WorkerId } from "../work_queue/queue.ts";
 import { DRAIN_TIMEOUT_MS } from "./limits.ts";
@@ -24,6 +26,15 @@ const workerIdStr = rawId.slice(0, MAX_WORKER_ID_LEN);
 const workerIdResult = WorkerId.parse(workerIdStr);
 assert(workerIdResult.ok, "worker: failed to parse worker id", { workerIdStr });
 const workerId = workerIdResult.value;
+
+const ANTHROPIC_API_KEY = process.env["ANTHROPIC_API_KEY"];
+assert(
+  ANTHROPIC_API_KEY !== undefined && ANTHROPIC_API_KEY.length > 0,
+  "worker: ANTHROPIC_API_KEY must be set",
+);
+
+const model = new AnthropicModelClient({ apiKey: ANTHROPIC_API_KEY });
+const tools = new InMemoryToolRegistry([echoTool]);
 
 const sql = connect({ url: DATABASE_URL, applicationName: "relay-worker" });
 const queue = makeWorkerQueue(sql);
@@ -46,7 +57,7 @@ await runWorker(
     queue,
     workerId,
     clock: realClock,
-    dispatcher: triggerHandlers({ sql, clock: realClock }),
+    dispatcher: triggerHandlers({ sql, clock: realClock, model, tools }),
   },
   ctrl.signal,
 );
