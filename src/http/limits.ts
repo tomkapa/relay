@@ -11,3 +11,11 @@ export const PORT_MAX = 65_535;
 
 // Default port used when PORT env var is absent.
 export const DEFAULT_PORT = 8080;
+
+// Max time POST /trigger holds the HTTP response open. Upper-bounded to fit inside typical
+// LB idle timeout (100s on AWS ALB / GCP LB) minus 5s headroom.
+export const MAX_SYNC_WAIT_MS = 90_000;
+
+// Bounded registry size — static allocation per CLAUDE.md §9. Rejects pushes past cap
+// with 503 so a stuck worker cannot drive HTTP-side unbounded Map growth.
+export const MAX_PENDING_SYNC_WAITERS = 1_000;

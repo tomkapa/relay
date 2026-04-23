@@ -9,6 +9,8 @@ import { realClock } from "../core/clock.ts";
 import { connect } from "../db/client.ts";
 import { makeApp } from "./app.ts";
 import { DEFAULT_PORT, PORT_MAX, PORT_MIN } from "./limits.ts";
+import { makeReplyRegistry } from "./reply-registry.ts";
+import { startSyncListener } from "./sync-listener.ts";
 
 const DATABASE_URL = process.env["DATABASE_URL"];
 assert(DATABASE_URL !== undefined && DATABASE_URL.length > 0, "server: DATABASE_URL must be set");
@@ -22,7 +24,11 @@ assert(
 );
 
 const sql = connect({ url: DATABASE_URL, applicationName: "relay-http" });
-const app = makeApp({ sql: sql, clock: realClock });
+const registry = makeReplyRegistry(realClock);
+const app = makeApp({ sql, clock: realClock, registry });
+
+// Wire LISTEN before serving — ensures no request races the listener setup.
+const syncListener = await startSyncListener(sql, registry);
 
 const server = Bun.serve({
   port: portNum,
@@ -32,6 +38,7 @@ const server = Bun.serve({
 // Drain the connection pool on shutdown. Telemetry last so the drain itself is instrumented.
 async function shutdown(): Promise<void> {
   await server.stop();
+  await syncListener.stop();
   await sql.end({ timeout: 5 });
   await shutdownTelemetry();
 }

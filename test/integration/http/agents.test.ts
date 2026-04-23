@@ -11,6 +11,7 @@ import { FakeClock } from "../../../src/core/clock.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
 import { makeApp } from "../../../src/http/app.ts";
 import { MAX_REQUEST_BYTES } from "../../../src/http/limits.ts";
+import { makeReplyRegistry } from "../../../src/http/reply-registry.ts";
 import { MAX_SYSTEM_PROMPT_LEN } from "../../../src/agent/limits.ts";
 import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
 
@@ -53,7 +54,11 @@ beforeAll(async () => {
   const mig = await migrate(s, MIGRATIONS_DIR);
   if (!mig.ok) throw new Error(`migration setup failed: ${mig.error.kind}`);
   sqlRef = s;
-  appRef = makeApp({ sql: s, clock: new FakeClock(1_700_000_000_000) });
+  appRef = makeApp({
+    sql: s,
+    clock: new FakeClock(1_700_000_000_000),
+    registry: makeReplyRegistry(new FakeClock(1_700_000_000_000)),
+  });
 }, HOOK_TIMEOUT_MS);
 
 afterAll(async () => {
