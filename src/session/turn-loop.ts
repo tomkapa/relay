@@ -8,7 +8,7 @@ import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import type { AgentId, SessionId, TenantId } from "../ids.ts";
 import { TurnId, mintId } from "../ids.ts";
-import { Attr, SpanName, withSpan } from "../telemetry/otel.ts";
+import { Attr, SpanName, counter, withSpan } from "../telemetry/otel.ts";
 import type { ModelClient, ToolSchema } from "./model.ts";
 import { MODEL_CALL_TIMEOUT_MS, MAX_TURNS_PER_SESSION, TOOL_CALL_TIMEOUT_MS } from "./limits.ts";
 import type { ToolRegistry, ToolResult } from "./tools.ts";
@@ -126,12 +126,32 @@ async function dispatchTools(
   ctx: TurnCtx,
   timeoutMs: number,
 ): Promise<Result<readonly ToolResultBlock[], TurnLoopError>> {
+  const toolIterations = counter(
+    "relay.tool.dispatch_iteration_total",
+    "tool_use blocks dispatched within a turn.",
+  );
+  const toolCompletions = counter(
+    "relay.tool.dispatch_completion_total",
+    "Per tool_use outcome. relay.outcome ∈ {invoked, tool_unknown, timeout}.",
+  );
+
   const available = new Set(toolSchemas.map((s) => s.name));
   const results: ToolResultBlock[] = [];
 
   for (const block of content) {
     if (block.type !== "tool_use") continue;
+
+    const toolAttrs = {
+      [Attr.SessionId]: ctx.sessionId,
+      [Attr.AgentId]: ctx.agentId,
+      [Attr.TenantId]: ctx.tenantId,
+      [Attr.TurnId]: ctx.turnId,
+      [Attr.ToolName]: block.name,
+    };
+    toolIterations.add(1, toolAttrs);
+
     if (!available.has(block.name)) {
+      toolCompletions.add(1, { ...toolAttrs, [Attr.Outcome]: "tool_unknown" });
       return err({ kind: "tool_unknown", toolName: block.name });
     }
 
@@ -139,10 +159,14 @@ async function dispatchTools(
     try {
       toolResult = await invokeOneTool(tools, block, ctx, timeoutMs);
     } catch (e) {
-      if (isAbortTimeout(e)) return err({ kind: "timeout", stage: "tool" });
+      if (isAbortTimeout(e)) {
+        toolCompletions.add(1, { ...toolAttrs, [Attr.Outcome]: "timeout" });
+        return err({ kind: "timeout", stage: "tool" });
+      }
       throw e; // programmer error from tool invoker — propagate, lease expires
     }
 
+    toolCompletions.add(1, { ...toolAttrs, [Attr.Outcome]: "invoked" });
     results.push({
       type: "tool_result",
       toolUseId: block.id,
@@ -227,7 +251,23 @@ export async function runTurnLoop(
   const turns: Turn[] = [];
   const toolSchemas = deps.tools.list();
 
+  const turnIterations = counter(
+    "relay.turn_loop.iteration_total",
+    "Turn-loop body executions. Rate = per-session model-call frequency.",
+  );
+  const turnCompletions = counter(
+    "relay.turn_loop.completion_total",
+    "Turn-loop exits. Attribute relay.outcome ∈ {end_turn, cap_exceeded, model_error, tool_error, persist_error}.",
+  );
+  const baseAttrs = {
+    [Attr.SessionId]: input.sessionId,
+    [Attr.AgentId]: input.agentId,
+    [Attr.TenantId]: input.tenantId,
+  };
+
   for (let i = 0; i < cap; i++) {
+    turnIterations.add(1, baseAttrs);
+
     const turnResult = await runOneTurn(
       { model: deps.model, tools: deps.tools, clock: deps.clock },
       {
@@ -242,7 +282,13 @@ export async function runTurnLoop(
         toolTimeoutMs,
       },
     );
-    if (!turnResult.ok) return turnResult;
+    if (!turnResult.ok) {
+      turnCompletions.add(1, {
+        ...baseAttrs,
+        [Attr.Outcome]: outcomeFromTurnLoopError(turnResult.error),
+      });
+      return turnResult;
+    }
 
     const turn = turnResult.value;
     turns.push(turn);
@@ -253,7 +299,10 @@ export async function runTurnLoop(
       tenantId: input.tenantId,
       agentId: input.agentId,
     });
-    if (!saved.ok) return saved;
+    if (!saved.ok) {
+      turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "persist_error" });
+      return saved;
+    }
 
     messages.push({ role: "assistant", content: turn.response.content });
     if (turn.toolResults.length > 0) {
@@ -261,9 +310,26 @@ export async function runTurnLoop(
     }
 
     if (turn.response.stopReason === "end_turn") {
+      turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "end_turn" });
       return ok({ turns, finalResponse: turn.response });
     }
   }
 
+  turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "cap_exceeded" });
   return err({ kind: "turn_cap_exceeded", max: cap });
+}
+
+function outcomeFromTurnLoopError(e: TurnLoopError): string {
+  switch (e.kind) {
+    case "model_call_failed":
+      return "model_error";
+    case "tool_invocation_failed":
+    case "tool_unknown":
+    case "timeout":
+      return "tool_error";
+    case "turn_cap_exceeded":
+      return "cap_exceeded";
+    case "persist_turn_failed":
+      return "persist_error";
+  }
 }
