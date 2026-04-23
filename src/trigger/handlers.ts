@@ -9,6 +9,7 @@ import { err, ok, type Result, unreachable } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
 import { ChainId, Depth, EnvelopeId, InboundMessageId, TaskId, TenantId, mintId } from "../ids.ts";
 import type {
+  AgentId as AgentIdBrand,
   ChainId as ChainIdBrand,
   Depth as DepthBrand,
   SessionId as SessionIdBrand,
@@ -32,10 +33,19 @@ import { parseInboundMessageRow } from "./inbound/payload.ts";
 import type { InboundPayloadError } from "./inbound/payload.ts";
 import { loadOpenTargetSession } from "../session/load-open.ts";
 import type { TargetSessionError } from "../session/load-open.ts";
+import type { ModelClient } from "../session/model.ts";
+import type { ToolRegistry } from "../session/tools.ts";
+import { runTurnLoop } from "../session/turn-loop.ts";
+import type { Message } from "../session/turn.ts";
+import { closeSession } from "../session/close.ts";
+import type { SessionCloseError, SessionEndReason } from "../session/close.ts";
+import type { TranscriptEntry } from "../session/transcript.ts";
 
 export type HandlerDeps = {
   readonly sql: Sql;
   readonly clock: Clock;
+  readonly model: ModelClient;
+  readonly tools: ToolRegistry;
 };
 
 type HookResult = { decision: "approve" } | { decision: "deny"; reason: string };
@@ -50,6 +60,79 @@ const hookStub: (sessionId: SessionIdBrand, payload: TriggerPayload) => Promise<
 // Pass-through stub for RELAY-36/37 evaluator.
 const preMessageReceiveStub: () => Promise<HookResult> = () =>
   Promise.resolve({ decision: "approve" });
+
+export function openingContextToLoopInput(
+  context: readonly TranscriptEntry[],
+  systemPrompt: string,
+): { systemPrompt: string; initialMessages: readonly Message[] } {
+  assert(context.length >= 2, "openingContextToLoopInput: expected system + user entries");
+  const first = context[0];
+  assert(first !== undefined, "openingContextToLoopInput: first entry must exist");
+  assert(first.role === "system", "openingContextToLoopInput: first entry must be system");
+
+  const initialMessages: Message[] = [];
+  for (let i = 1; i < context.length; i++) {
+    const entry = context[i];
+    assert(entry !== undefined, "openingContextToLoopInput: undefined entry at index");
+    assert(entry.role === "user", "openingContextToLoopInput: expected user entries after system");
+    initialMessages.push({ role: "user", content: [{ type: "text", text: entry.content }] });
+  }
+  return { systemPrompt, initialMessages };
+}
+
+type LoopTermination =
+  | { kind: "close"; reason: SessionEndReason }
+  | { kind: "retry"; handlerError: HandlerError };
+
+function classifyLoopResult(result: Awaited<ReturnType<typeof runTurnLoop>>): LoopTermination {
+  if (result.ok) return { kind: "close", reason: { kind: "end_turn" } };
+  const e = result.error;
+  switch (e.kind) {
+    case "turn_cap_exceeded":
+      return { kind: "close", reason: { kind: "turn_cap_exceeded", max: e.max } };
+    case "model_call_failed":
+      return {
+        kind: "retry",
+        handlerError: { kind: "handler_failed", reason: `model_call_failed: ${e.detail}` },
+      };
+    case "tool_invocation_failed":
+      return {
+        kind: "retry",
+        handlerError: {
+          kind: "handler_failed",
+          reason: `tool_invocation_failed: ${e.toolName} — ${e.detail}`,
+        },
+      };
+    case "tool_unknown":
+      return {
+        kind: "retry",
+        handlerError: { kind: "handler_failed", reason: `tool_unknown: ${e.toolName}` },
+      };
+    case "timeout":
+      return { kind: "retry", handlerError: { kind: "handler_timeout" } };
+    case "persist_turn_failed":
+      return {
+        kind: "retry",
+        handlerError: { kind: "handler_failed", reason: `persist_turn_failed: ${e.detail}` },
+      };
+    default:
+      throw unreachable(e);
+  }
+}
+
+function mapCloseError(e: SessionCloseError): HandlerError {
+  switch (e.kind) {
+    case "session_not_found":
+      return {
+        kind: "handler_failed",
+        reason: `session not found at close: ${e.sessionId as string}`,
+      };
+    case "tenant_mismatch":
+      return { kind: "handler_failed", reason: "session tenant mismatch at close" };
+    default:
+      throw unreachable(e);
+  }
+}
 
 function mapPayloadError(e: TriggerPayloadError): HandlerError {
   switch (e.kind) {
@@ -114,6 +197,50 @@ function mintChainAndDepth(): { chainId: ChainIdBrand; depth: DepthBrand } {
   const depthResult = Depth.parse(0);
   assert(depthResult.ok, "mintChainAndDepth: depth 0 out of range");
   return { chainId, depth: depthResult.value };
+}
+
+async function runLoopAndClose(
+  deps: HandlerDeps,
+  item: WorkItem,
+  session: { readonly id: SessionIdBrand },
+  agentId: AgentIdBrand,
+  systemPrompt: string,
+  context: readonly TranscriptEntry[],
+): Promise<Result<void, HandlerError>> {
+  const loopInput = openingContextToLoopInput(context, systemPrompt);
+  const loopResult = await runTurnLoop(
+    { sql: deps.sql, clock: deps.clock, model: deps.model, tools: deps.tools },
+    { sessionId: session.id, agentId, tenantId: item.tenantId, ...loopInput },
+  );
+  const termination = classifyLoopResult(loopResult);
+  if (termination.kind === "retry") {
+    counter("session.turn_loop_outcome_total").add(1, {
+      [Attr.TenantId]: item.tenantId,
+      [Attr.TriggerKind]: item.kind,
+      [Attr.TurnLoopOutcome]: "retryable_error",
+    });
+    return err(termination.handlerError);
+  }
+  const closeResult = await closeSession(deps.sql, deps.clock, {
+    sessionId: session.id,
+    tenantId: item.tenantId,
+    agentId,
+    reason: termination.reason,
+  });
+  if (!closeResult.ok) return err(mapCloseError(closeResult.error));
+  counter("session.turn_loop_outcome_total").add(1, {
+    [Attr.TenantId]: item.tenantId,
+    [Attr.TriggerKind]: item.kind,
+    [Attr.TurnLoopOutcome]: termination.reason.kind,
+  });
+  const turnCount = loopResult.ok ? loopResult.value.turns.length : 0;
+  emit("INFO", "trigger.session_start.turn_complete", {
+    [Attr.TenantId]: item.tenantId,
+    [Attr.SessionId]: session.id,
+    [Attr.WorkId]: item.id,
+    [Attr.TurnsCount]: turnCount,
+  });
+  return ok(undefined);
 }
 
 async function finalizeSession(
@@ -196,7 +323,22 @@ async function handleSessionStart(
       });
       if (!sessionResult.ok) return err(mapSessionError(sessionResult.error));
 
-      return finalizeSession(deps, item, sessionResult.value, payload, start);
+      const session = sessionResult.value;
+      if (session.isDuplicate) {
+        return finalizeSession(deps, item, session, payload, start);
+      }
+
+      const loopResult = await runLoopAndClose(
+        deps,
+        item,
+        session,
+        payload.targetAgentId,
+        agentResult.value.systemPrompt,
+        context,
+      );
+      if (!loopResult.ok) return loopResult;
+
+      return finalizeSession(deps, item, session, payload, start);
     },
   );
 }

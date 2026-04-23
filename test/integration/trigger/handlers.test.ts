@@ -22,6 +22,9 @@ import type { HandlerDeps } from "../../../src/trigger/handlers.ts";
 import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
 import type { WorkItem } from "../../../src/work_queue/queue.ts";
 import { MAX_ENVELOPE_BYTES } from "../../../src/trigger/limits.ts";
+import type { ModelClient } from "../../../src/session/model.ts";
+import type { ModelResponse } from "../../../src/session/turn.ts";
+import { InMemoryToolRegistry } from "../../../src/session/tools-inmemory.ts";
 
 let sqlRef: Sql | undefined;
 
@@ -109,6 +112,19 @@ async function insertOpenSession(
   return r.value;
 }
 
+function endTurnModel(): ModelClient {
+  const response: ModelResponse = {
+    content: [{ type: "text", text: "Hello!" }],
+    stopReason: "end_turn",
+    usage: { inputTokens: 10, outputTokens: 5 },
+  };
+  return { complete: () => Promise.resolve(response) };
+}
+
+function fakeDeps(sql: Sql, clock: FakeClock, model: ModelClient = endTurnModel()): HandlerDeps {
+  return { sql, clock, model, tools: new InMemoryToolRegistry([]) };
+}
+
 beforeAll(async () => {
   if (!DB_URL) return;
   const s = postgres(DB_URL, { max: 4, idle_timeout: 2 });
@@ -167,7 +183,7 @@ describeOrSkip("session_start — message handler", () => {
         attempts: 1,
       };
 
-      const deps: HandlerDeps = { sql, clock };
+      const deps = fakeDeps(sql, clock);
       const ctrl = new AbortController();
       const result = await triggerHandlers(deps).session_start(workItem, ctrl.signal);
 
@@ -218,7 +234,7 @@ describeOrSkip("session_start — message handler", () => {
         attempts: 1,
       };
 
-      const result = await triggerHandlers({ sql, clock }).session_start(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).session_start(
         workItem,
         new AbortController().signal,
       );
@@ -260,7 +276,7 @@ describeOrSkip("task_fire handler", () => {
         attempts: 1,
       };
 
-      const result = await triggerHandlers({ sql, clock }).task_fire(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).task_fire(
         workItem,
         new AbortController().signal,
       );
@@ -310,7 +326,7 @@ describeOrSkip("idempotency", () => {
         attempts: 1,
       };
 
-      const deps: HandlerDeps = { sql, clock };
+      const deps = fakeDeps(sql, clock);
       const signal = new AbortController().signal;
 
       const r1 = await triggerHandlers(deps).session_start(workItem, signal);
@@ -365,7 +381,7 @@ describeOrSkip("tenant mismatch", () => {
         attempts: 1,
       };
 
-      const result = await triggerHandlers({ sql, clock }).session_start(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).session_start(
         workItem,
         new AbortController().signal,
       );
@@ -418,7 +434,7 @@ describeOrSkip("unknown agent", () => {
         attempts: 1,
       };
 
-      const result = await triggerHandlers({ sql, clock }).session_start(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).session_start(
         workItem,
         new AbortController().signal,
       );
@@ -476,7 +492,7 @@ describeOrSkip("oversized envelope", () => {
         attempts: 1,
       };
 
-      const result = await triggerHandlers({ sql, clock }).session_start(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).session_start(
         workItem,
         new AbortController().signal,
       );
@@ -525,7 +541,7 @@ describeOrSkip("inbound_message handler — happy path", () => {
         attempts: 1,
       };
 
-      const result = await triggerHandlers({ sql, clock }).inbound_message(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
         workItem,
         new AbortController().signal,
       );
@@ -562,7 +578,7 @@ describeOrSkip("inbound_message handler — happy path", () => {
           scheduledAt: new Date(clock.now()),
           attempts: 1,
         };
-        const result = await triggerHandlers({ sql, clock }).inbound_message(
+        const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
           workItem,
           new AbortController().signal,
         );
@@ -626,7 +642,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         scheduledAt: new Date(0),
         attempts: 1,
       };
-      const result = await triggerHandlers({ sql, clock }).inbound_message(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
         workItem,
         new AbortController().signal,
       );
@@ -653,7 +669,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         scheduledAt: new Date(0),
         attempts: 1,
       };
-      const result = await triggerHandlers({ sql, clock }).inbound_message(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
         workItem,
         new AbortController().signal,
       );
@@ -695,7 +711,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         scheduledAt: new Date(clock.now()),
         attempts: 1,
       };
-      const result = await triggerHandlers({ sql, clock }).inbound_message(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
         workItem,
         new AbortController().signal,
       );
@@ -738,7 +754,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         scheduledAt: new Date(clock.now()),
         attempts: 1,
       };
-      const result = await triggerHandlers({ sql, clock }).inbound_message(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
         workItem,
         new AbortController().signal,
       );
@@ -785,7 +801,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         scheduledAt: new Date(clock.now()),
         attempts: 1,
       };
-      const result = await triggerHandlers({ sql, clock }).inbound_message(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
         workItem,
         new AbortController().signal,
       );
@@ -833,13 +849,187 @@ describeOrSkip("inbound_message handler — error cases", () => {
         scheduledAt: new Date(clock.now()),
         attempts: 1,
       };
-      const result = await triggerHandlers({ sql, clock }).inbound_message(
+      const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
         workItem,
         new AbortController().signal,
       );
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error.kind).toBe("handler_failed");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+});
+
+describeOrSkip("session_start — turn loop wiring", () => {
+  test(
+    "fresh session: model returns end_turn → session closed, one turn persisted",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_700_000_000_000);
+      const tenantId = tenant();
+      const agentId = await insertAgent(sql, tenantId);
+
+      const envelopeResult = await writeEnvelope(sql, tenantId, "message", {
+        kind: "message",
+        sender: { type: "human", id: "user-1" },
+        targetAgentId: agentId as string,
+        content: "Hello",
+        receivedAt: new Date(clock.now()).toISOString(),
+      });
+      assert(envelopeResult.ok, "fixture: writeEnvelope failed");
+
+      const wid = await enqueue(sql, {
+        tenantId,
+        kind: "session_start",
+        payloadRef: envelopeResult.value,
+        scheduledAt: new Date(clock.now()),
+      });
+      assert(wid.ok, "fixture: enqueue failed");
+      const workItemId = wid.value as string;
+
+      const workItem: WorkItem = {
+        id: wid.value,
+        tenantId,
+        kind: "session_start",
+        payloadRef: envelopeResult.value,
+        scheduledAt: new Date(clock.now()),
+        attempts: 1,
+      };
+
+      const result = await triggerHandlers(fakeDeps(sql, clock)).session_start(
+        workItem,
+        new AbortController().signal,
+      );
+      expect(result.ok).toBe(true);
+
+      const sessions = await sql<{ id: string; closed_at: Date | null }[]>`
+        SELECT id, closed_at FROM sessions WHERE source_work_item_id = ${workItemId}
+      `;
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]?.closed_at).not.toBeNull();
+
+      const sessionId = sessions[0]?.id;
+      assert(sessionId !== undefined, "integration test: session row must exist");
+      const turns = await sql<{ turn_index: number }[]>`
+        SELECT turn_index FROM turns WHERE session_id = ${sessionId}
+      `;
+      expect(turns).toHaveLength(1);
+      expect(turns[0]?.turn_index).toBe(0);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "fresh session: model_call_failed → handler_failed, session row not closed",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_700_000_000_000);
+      const tenantId = tenant();
+      const agentId = await insertAgent(sql, tenantId);
+
+      const envelopeResult = await writeEnvelope(sql, tenantId, "message", {
+        kind: "message",
+        sender: { type: "human", id: "user-1" },
+        targetAgentId: agentId as string,
+        content: "Keep going",
+        receivedAt: new Date(clock.now()).toISOString(),
+      });
+      assert(envelopeResult.ok, "fixture: writeEnvelope failed");
+
+      const wid = await enqueue(sql, {
+        tenantId,
+        kind: "session_start",
+        payloadRef: envelopeResult.value,
+        scheduledAt: new Date(clock.now()),
+      });
+      assert(wid.ok, "fixture: enqueue failed");
+      const workItemId = wid.value as string;
+
+      const workItem: WorkItem = {
+        id: wid.value,
+        tenantId,
+        kind: "session_start",
+        payloadRef: envelopeResult.value,
+        scheduledAt: new Date(clock.now()),
+        attempts: 1,
+      };
+
+      const failModel: ModelClient = {
+        complete: () => Promise.reject(new Error("model unavailable")),
+      };
+      const result = await triggerHandlers(fakeDeps(sql, clock, failModel)).session_start(
+        workItem,
+        new AbortController().signal,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("handler_failed");
+
+      const sessions = await sql<{ closed_at: Date | null }[]>`
+        SELECT closed_at FROM sessions WHERE source_work_item_id = ${workItemId}
+      `;
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]?.closed_at).toBeNull();
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "duplicate session: loop skipped, session not closed again",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_700_000_000_000);
+      const tenantId = tenant();
+      const agentId = await insertAgent(sql, tenantId);
+
+      const envelopeResult = await writeEnvelope(sql, tenantId, "message", {
+        kind: "message",
+        sender: { type: "human", id: "user-1" },
+        targetAgentId: agentId as string,
+        content: "Retry me",
+        receivedAt: new Date(clock.now()).toISOString(),
+      });
+      assert(envelopeResult.ok, "fixture: writeEnvelope failed");
+
+      const wid = await enqueue(sql, {
+        tenantId,
+        kind: "session_start",
+        payloadRef: envelopeResult.value,
+        scheduledAt: new Date(clock.now()),
+      });
+      assert(wid.ok, "fixture: enqueue failed");
+      const workItemId = wid.value as string;
+
+      const workItem: WorkItem = {
+        id: wid.value,
+        tenantId,
+        kind: "session_start",
+        payloadRef: envelopeResult.value,
+        scheduledAt: new Date(clock.now()),
+        attempts: 1,
+      };
+
+      const deps = fakeDeps(sql, clock);
+
+      const r1 = await triggerHandlers(deps).session_start(workItem, new AbortController().signal);
+      expect(r1.ok).toBe(true);
+
+      const r2 = await triggerHandlers(deps).session_start(workItem, new AbortController().signal);
+      expect(r2.ok).toBe(true);
+
+      const sessions = await sql<{ id: string; closed_at: Date | null }[]>`
+        SELECT id, closed_at FROM sessions WHERE source_work_item_id = ${workItemId}
+      `;
+      expect(sessions).toHaveLength(1);
+
+      const sessionId = sessions[0]?.id;
+      assert(sessionId !== undefined, "integration test: session row must exist");
+      // Only one turn row — the duplicate run did not insert a second turn.
+      const turns = await sql<{ turn_index: number }[]>`
+        SELECT turn_index FROM turns WHERE session_id = ${sessionId}
+      `;
+      expect(turns).toHaveLength(1);
     },
     HOOK_TIMEOUT_MS,
   );
