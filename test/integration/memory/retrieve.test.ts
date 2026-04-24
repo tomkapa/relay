@@ -531,12 +531,10 @@ describeOrSkip("retrieveMemory (integration)", () => {
         zeroAlphaResult.value[1]?.similarity ?? 0,
       );
 
-      // With alpha=2: dim1 memory (importance=0.9) may outrank dim0 (importance=0.1)
+      // With alpha=2: dim1 memory (importance=0.9) outranks dim0 (importance=0.1)
       // because 0.9^2 * 0.707 = 0.572 > 0.1^2 * 1.0 = 0.01.
-      const highAlphaScores = highAlphaResult.value.map((r) => r.score);
-      const zeroAlphaScores = zeroAlphaResult.value.map((r) => r.score);
-      // The rankings differ — verify at least one ordering differs.
-      expect(JSON.stringify(highAlphaScores)).not.toEqual(JSON.stringify(zeroAlphaScores));
+      // The top-ranked id must differ between the two alpha settings.
+      expect(highAlphaResult.value[0]?.id).not.toBe(zeroAlphaResult.value[0]?.id);
     },
     HOOK_TIMEOUT_MS,
   );

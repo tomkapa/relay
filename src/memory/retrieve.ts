@@ -103,9 +103,8 @@ export async function retrieveMemory(
   clock: Clock,
   input: RetrieveMemoryInput,
 ): Promise<Result<readonly RankedMemory[], RetrieveMemoryError>> {
-  const pool =
-    (input.candidatePool as unknown as number | undefined) ?? DEFAULT_RETRIEVAL_CANDIDATES;
-  const k = input.k as unknown as number;
+  const pool = input.candidatePool ?? DEFAULT_RETRIEVAL_CANDIDATES;
+  const k = input.k;
   const efSearch = Math.max(pool, HNSW_EF_SEARCH_FLOOR);
 
   return withSpan(

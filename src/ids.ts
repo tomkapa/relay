@@ -137,8 +137,7 @@ export const CandidatePool = {
     if (!Number.isInteger(raw) || raw < 1 || raw > MAX_RETRIEVAL_CANDIDATES) {
       return err({ kind: "out_of_range", value: raw, min: 1, max: MAX_RETRIEVAL_CANDIDATES });
     }
-    const kNum = k as unknown as number;
-    if (raw < kNum) return err({ kind: "below_k", pool: raw, k: kNum });
+    if (raw < k) return err({ kind: "below_k", pool: raw, k });
     return ok(raw as CandidatePool);
   },
 };
