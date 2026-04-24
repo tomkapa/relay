@@ -3,6 +3,10 @@
 // Max entries returned by a single retrieval call. Higher → better recall, worse latency.
 export const MAX_RETRIEVAL = 32;
 
+// Embedding vector dimension. Commits to OpenAI text-embedding-3-small (experimentation phase).
+// Qwen3-Embed-8B (4096-dim) migration is owned by RELAY-214 — do not parametrize.
+export const EMBEDDING_DIM = 1536;
+
 // Max length of a single memory entry's text. Longer entries are truncated at the write boundary
 // so the embedding step has a bounded input (CLAUDE.md §5 — cap strings crossing trust boundaries).
 export const MAX_ENTRY_TEXT_BYTES = 8 * 1024;

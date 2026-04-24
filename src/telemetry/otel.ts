@@ -76,6 +76,7 @@ export const Attr = {
   TurnsCount: "relay.turns.count",
   Outcome: "relay.outcome",
   EnvelopeId: "relay.envelope.id",
+  MemoryKind: "relay.memory.kind",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 

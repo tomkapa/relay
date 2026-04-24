@@ -24,6 +24,8 @@ coveragePathIgnorePatterns = [
   "src/work_queue/observability.ts",
   # Agent creation domain function — DB shell, covered by test/integration/agent/create.test.ts.
   "src/agent/create.ts",
+  # Memory write path — DB shell, covered by test/integration/memory/insert.test.ts.
+  "src/memory/insert.ts",
   # Agent load — DB shell, covered by test/integration/trigger/handlers.test.ts.
   "src/agent/load.ts",
   # Session creation — DB shell, covered by test/integration/trigger/handlers.test.ts.
