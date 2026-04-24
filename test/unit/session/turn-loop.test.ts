@@ -10,6 +10,7 @@ import {
   AgentId as AgentIdParser,
   SessionId as SessionIdParser,
   TenantId as TenantIdParser,
+  ToolUseId,
 } from "../../../src/ids.ts";
 import { assert } from "../../../src/core/assert.ts";
 import type { ModelClient, ToolSchema } from "../../../src/session/model.ts";
@@ -49,10 +50,15 @@ function textResponse(text: string): ModelResponse {
   };
 }
 
+function makeToolUseBlock(id: string, name: string, input: Record<string, unknown>): ToolUseBlock {
+  const parsed = ToolUseId.parse(id);
+  assert(parsed.ok, "makeToolUseBlock: invalid id");
+  return { type: "tool_use", id: parsed.value, name, input };
+}
+
 function toolUseResponse(id: string, name: string, input: Record<string, unknown>): ModelResponse {
-  const toolBlock: ToolUseBlock = { type: "tool_use", id, name, input };
   return {
-    content: [toolBlock],
+    content: [makeToolUseBlock(id, name, input)],
     stopReason: "tool_use",
     usage: { inputTokens: 10, outputTokens: 5 },
   };
@@ -128,7 +134,7 @@ describe("runTurnLoop", () => {
       complete: ({ messages }) => {
         callCount++;
         if (callCount === 1) {
-          const toolBlock: ToolUseBlock = { type: "tool_use", id: "tc_2", name: "boom", input: {} };
+          const toolBlock = makeToolUseBlock("tc_2", "boom", {});
           return Promise.resolve({
             content: [toolBlock],
             stopReason: "tool_use",
@@ -161,7 +167,7 @@ describe("runTurnLoop", () => {
     const model: ModelClient = {
       complete: () =>
         Promise.resolve({
-          content: [{ type: "tool_use" as const, id: "tc_3", name: "ghost", input: {} }],
+          content: [makeToolUseBlock("tc_3", "ghost", {})],
           stopReason: "tool_use",
           usage: { inputTokens: 5, outputTokens: 3 },
         }),
@@ -222,7 +228,7 @@ describe("runTurnLoop", () => {
     const model: ModelClient = {
       complete: () =>
         Promise.resolve({
-          content: [{ type: "tool_use" as const, id: "tc_4", name: "echo", input: { text: "hi" } }],
+          content: [makeToolUseBlock("tc_4", "echo", { text: "hi" })],
           stopReason: "tool_use",
           usage: { inputTokens: 5, outputTokens: 3 },
         }),
@@ -418,8 +424,8 @@ describe("saturation counters — tool dispatch", () => {
         if (callCount === 1)
           return Promise.resolve({
             content: [
-              { type: "tool_use" as const, id: "tc_a", name: "echo", input: { text: "a" } },
-              { type: "tool_use" as const, id: "tc_b", name: "echo", input: { text: "b" } },
+              makeToolUseBlock("tc_a", "echo", { text: "a" }),
+              makeToolUseBlock("tc_b", "echo", { text: "b" }),
             ],
             stopReason: "tool_use" as const,
             usage: { inputTokens: 5, outputTokens: 3 },
@@ -446,7 +452,7 @@ describe("saturation counters — tool dispatch", () => {
     const model: ModelClient = {
       complete: () =>
         Promise.resolve({
-          content: [{ type: "tool_use" as const, id: "tc_x", name: "ghost", input: {} }],
+          content: [makeToolUseBlock("tc_x", "ghost", {})],
           stopReason: "tool_use" as const,
           usage: { inputTokens: 5, outputTokens: 3 },
         }),
@@ -559,7 +565,7 @@ describe("hook seams — call order and payloads", () => {
     expect(captured).toHaveLength(1);
     const p = captured[0];
     assert(p !== undefined, "preToolUse must have been called");
-    expect(p.toolUseId).toBe("tool-use-id-42");
+    expect(p.toolUseId as string).toBe("tool-use-id-42");
     expect(p.toolName).toBe("echo");
     expect(p.toolInput).toEqual({ text: "hello" });
     expect(p.sessionId).toBe(ids.sessionId);
@@ -603,7 +609,7 @@ describe("hook seams — call order and payloads", () => {
     expect(captured).toHaveLength(1);
     const p = captured[0];
     assert(p !== undefined, "postToolUse must have been called");
-    expect(p.toolUseId).toBe("tu-99");
+    expect(p.toolUseId as string).toBe("tu-99");
     expect(p.toolName).toBe("echo");
     expect(p.outcome).toBe("invoked");
     expect(p.sessionId).toBe(ids.sessionId);
@@ -629,7 +635,7 @@ describe("hook seams — call order and payloads", () => {
       complete: () => {
         callCount++;
         if (callCount === 1) {
-          const b: ToolUseBlock = { type: "tool_use", id: "tu-boom", name: "boom", input: {} };
+          const b = makeToolUseBlock("tu-boom", "boom", {});
           return Promise.resolve({
             content: [b],
             stopReason: "tool_use",
@@ -715,8 +721,8 @@ describe("hook seams — relay.hook.evaluation_total counter", () => {
         if (callCount === 1)
           return Promise.resolve({
             content: [
-              { type: "tool_use" as const, id: "tc_a", name: "echo", input: { text: "a" } },
-              { type: "tool_use" as const, id: "tc_b", name: "echo", input: { text: "b" } },
+              makeToolUseBlock("tc_a", "echo", { text: "a" }),
+              makeToolUseBlock("tc_b", "echo", { text: "b" }),
             ],
             stopReason: "tool_use" as const,
             usage: { inputTokens: 5, outputTokens: 3 },

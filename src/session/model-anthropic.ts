@@ -4,6 +4,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { assert } from "../core/assert.ts";
+import { ToolUseId } from "../ids.ts";
 import type { ModelClient, ToolSchema } from "./model.ts";
 import type { ContentBlock, Message, ModelResponse, ModelUsage, StopReason } from "./turn.ts";
 
@@ -52,9 +53,11 @@ function fromAnthropicContentBlock(block: Anthropic.ContentBlock): ContentBlock 
     return { type: "text", text: block.text };
   }
   if (block.type === "tool_use") {
+    const idResult = ToolUseId.parse(block.id);
+    assert(idResult.ok, "fromAnthropicContentBlock: invalid tool_use id", { id: block.id });
     return {
       type: "tool_use",
-      id: block.id,
+      id: idResult.value,
       name: block.name,
       input: block.input as Readonly<Record<string, unknown>>,
     };

@@ -11,6 +11,7 @@ import { MAX_RETRIEVAL, MAX_RETRIEVAL_CANDIDATES } from "./memory/limits.ts";
 export type AgentId = Brand<string, "AgentId">;
 export type SessionId = Brand<string, "SessionId">;
 export type TurnId = Brand<string, "TurnId">;
+export type ToolUseId = Brand<string, "ToolUseId">;
 export type TaskId = Brand<string, "TaskId">;
 export type MemoryId = Brand<string, "MemoryId">;
 export type HookId = Brand<string, "HookId">;
@@ -29,6 +30,8 @@ export type IdParseError =
 // UUIDv4 or UUIDv7 shape — 8-4-4-4-12 hex, with version nibble in {4, 7}.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ID_MAX_LEN = 36;
+// Model-assigned tool_use ids are opaque strings ("toolu_..."), not UUIDs.
+const TOOL_USE_ID_MAX_LEN = 128;
 
 function parseUuid<B extends string>(raw: string): Result<Brand<string, B>, IdParseError> {
   if (raw.length === 0) return err({ kind: "empty" });
@@ -74,6 +77,14 @@ export const EnvelopeId = {
 export const InboundMessageId = {
   parse: (raw: string): Result<InboundMessageId, IdParseError> =>
     parseUuid<"InboundMessageId">(raw),
+};
+export const ToolUseId = {
+  parse: (raw: string): Result<ToolUseId, IdParseError> => {
+    if (raw.length === 0) return err({ kind: "empty" });
+    if (raw.length > TOOL_USE_ID_MAX_LEN)
+      return err({ kind: "too_long", length: raw.length, max: TOOL_USE_ID_MAX_LEN });
+    return ok(raw as ToolUseId);
+  },
 };
 
 // Mint a new UUID-based branded id. Asserts that randomUUID() produces a valid value,

@@ -107,7 +107,7 @@ async function callModel(
 
 async function invokeOneTool(
   tools: ToolRegistry,
-  block: { id: string; name: string; input: Readonly<Record<string, unknown>> },
+  block: ToolUseBlock,
   ctx: TurnCtx,
   timeoutMs: number,
 ): Promise<ToolResult> {

@@ -12,6 +12,7 @@ import {
   SessionId,
   TaskId,
   TenantId,
+  ToolUseId,
   TurnId,
   UserId,
   mintId,
@@ -207,5 +208,28 @@ describe("mintId", () => {
     const a = mintId(SessionId.parse, "test") as string;
     const b = mintId(SessionId.parse, "test") as string;
     expect(a).not.toBe(b);
+  });
+});
+
+describe("ToolUseId.parse", () => {
+  test("accepts a typical model-assigned id", () => {
+    const r = ToolUseId.parse("toolu_01xyWv3jHVnVdOyT9F6Ertd3");
+    expect(r.ok).toBe(true);
+  });
+
+  test("accepts a short id", () => {
+    expect(ToolUseId.parse("tc_1").ok).toBe(true);
+  });
+
+  test("rejects empty", () => {
+    const r = ToolUseId.parse("");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("empty");
+  });
+
+  test("rejects overlong (>128 chars)", () => {
+    const r = ToolUseId.parse("x".repeat(129));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("too_long");
   });
 });

@@ -1,7 +1,7 @@
 // ToolRegistry seam: the turn loop depends on this interface, not on any specific tool
 // implementation. InMemoryToolRegistry is the default; MCP connectors plug in here (RELAY-11).
 
-import type { AgentId, SessionId, TenantId, TurnId } from "../ids.ts";
+import type { AgentId, SessionId, TenantId, ToolUseId, TurnId } from "../ids.ts";
 import type { ToolSchema } from "./model.ts";
 
 export type ToolInvocationContext = {
@@ -9,7 +9,7 @@ export type ToolInvocationContext = {
   readonly agentId: AgentId;
   readonly tenantId: TenantId;
   readonly turnId: TurnId;
-  readonly toolUseId: string;
+  readonly toolUseId: ToolUseId;
 };
 
 export type ToolResult =
