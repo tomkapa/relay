@@ -46,7 +46,7 @@ function makeCaptureDeps(): { deps: SynthesizeDeps; captured: Captured } {
   };
 }
 
-const defaultSignal = AbortSignal.timeout(5_000);
+const makeDefaultSignal = () => AbortSignal.timeout(5_000);
 
 const agent = {
   id: AGENT_ID,
@@ -80,24 +80,24 @@ const taskPayload: TriggerPayload = {
 
 describe("synthesizeOpeningContext — system entry", () => {
   test("entry[0] is always the system prompt for message kind", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, makeDefaultSignal());
     expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 
   test("entry[0] is always the system prompt for event kind", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, makeDefaultSignal());
     expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 
   test("entry[0] is always the system prompt for task_fire kind", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, makeDefaultSignal());
     expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 });
 
 describe("synthesizeOpeningContext — message payload", () => {
   test("entry[1] has role user with sender metadata", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, makeDefaultSignal());
     const user = ctx[1];
     expect(user?.role).toBe("user");
     if (user?.role !== "user") return;
@@ -105,7 +105,7 @@ describe("synthesizeOpeningContext — message payload", () => {
   });
 
   test("entry[1] has receivedAt as ISO string", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, makeDefaultSignal());
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(user.receivedAt).toBe("2026-04-22T00:00:00.000Z");
@@ -114,7 +114,7 @@ describe("synthesizeOpeningContext — message payload", () => {
   test("truncates content past MAX_OPENING_USER_CONTENT with tail marker", async () => {
     const longContent = "x".repeat(MAX_OPENING_USER_CONTENT + 100);
     const payload: TriggerPayload = { ...messagePayload, content: longContent };
-    const ctx = await synthesizeOpeningContext(defaultDeps(), payload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(defaultDeps(), payload, agent, makeDefaultSignal());
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(user.content.length).toBeLessThanOrEqual(MAX_OPENING_USER_CONTENT);
@@ -124,7 +124,7 @@ describe("synthesizeOpeningContext — message payload", () => {
   test("does not truncate content at exactly MAX_OPENING_USER_CONTENT", async () => {
     const exactContent = "x".repeat(MAX_OPENING_USER_CONTENT);
     const payload: TriggerPayload = { ...messagePayload, content: exactContent };
-    const ctx = await synthesizeOpeningContext(defaultDeps(), payload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(defaultDeps(), payload, agent, makeDefaultSignal());
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(user.content).toBe(exactContent);
@@ -133,22 +133,22 @@ describe("synthesizeOpeningContext — message payload", () => {
 
 describe("synthesizeOpeningContext — event payload", () => {
   test("entry[1] content contains event source string", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, makeDefaultSignal());
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(user.content).toContain("github");
   });
 
   test("renderEvent output is deterministic for fixed payload", async () => {
-    const ctx1 = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, defaultSignal);
-    const ctx2 = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, defaultSignal);
+    const ctx1 = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, makeDefaultSignal());
+    const ctx2 = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, makeDefaultSignal());
     expect(ctx1[1]).toEqual(ctx2[1]);
   });
 });
 
 describe("synthesizeOpeningContext — task_fire payload", () => {
   test("entry[1] content contains firedAt ISO and intent", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, makeDefaultSignal());
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(user.content).toContain("2026-04-22T10:00:00.000Z");
@@ -156,7 +156,7 @@ describe("synthesizeOpeningContext — task_fire payload", () => {
   });
 
   test("renderTaskIntent surfaces firedAt ISO and intent text exactly once", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, makeDefaultSignal());
     const user = ctx[1];
     if (user?.role !== "user") return;
     const isoCount = (user.content.match(/2026-04-22T10:00:00\.000Z/g) ?? []).length;
@@ -169,19 +169,19 @@ describe("synthesizeOpeningContext — task_fire payload", () => {
 describe("synthesizeOpeningContext — always 2 entries", () => {
   test("returns exactly 2 entries for message", async () => {
     expect(
-      await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, defaultSignal),
+      await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, makeDefaultSignal()),
     ).toHaveLength(2);
   });
 
   test("returns exactly 2 entries for event", async () => {
     expect(
-      await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, defaultSignal),
+      await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, makeDefaultSignal()),
     ).toHaveLength(2);
   });
 
   test("returns exactly 2 entries for task_fire", async () => {
     expect(
-      await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, defaultSignal),
+      await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, makeDefaultSignal()),
     ).toHaveLength(2);
   });
 });
@@ -189,7 +189,7 @@ describe("synthesizeOpeningContext — always 2 entries", () => {
 describe("synthesizeOpeningContext — embed soft-fail paths", () => {
   test("synthesize_returnsBaseTuple_whenEmbedFails_transient", async () => {
     const deps = defaultDeps(); // transient error
-    const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, makeDefaultSignal());
     expect(ctx).toHaveLength(2);
     expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
@@ -200,7 +200,7 @@ describe("synthesizeOpeningContext — embed soft-fail paths", () => {
       clock: realClock,
       embedder: new FakeEmbeddingClient({ error: { kind: "permanent", message: "banned" } }),
     };
-    const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, makeDefaultSignal());
     expect(ctx).toHaveLength(2);
     expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
@@ -211,7 +211,7 @@ describe("synthesizeOpeningContext — embed soft-fail paths", () => {
       clock: realClock,
       embedder: new FakeEmbeddingClient({ error: { kind: "timeout", elapsedMs: 100 } }),
     };
-    const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, makeDefaultSignal());
     expect(ctx).toHaveLength(2);
     expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
@@ -224,7 +224,7 @@ describe("synthesizeOpeningContext — embed soft-fail paths", () => {
         error: { kind: "input_too_long", bytes: 9000, max: 8192 },
       }),
     };
-    const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, makeDefaultSignal());
     expect(ctx).toHaveLength(2);
     expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
@@ -233,7 +233,7 @@ describe("synthesizeOpeningContext — embed soft-fail paths", () => {
 describe("synthesizeOpeningContext — embedsExactUserMessageContent", () => {
   test("synthesize_embedsExactUserMessageContent_message", async () => {
     const { deps, captured } = makeCaptureDeps();
-    const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, makeDefaultSignal());
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(captured.text).toBe(user.content);
@@ -241,7 +241,7 @@ describe("synthesizeOpeningContext — embedsExactUserMessageContent", () => {
 
   test("synthesize_embedsExactUserMessageContent_event", async () => {
     const { deps, captured } = makeCaptureDeps();
-    const ctx = await synthesizeOpeningContext(deps, eventPayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(deps, eventPayload, agent, makeDefaultSignal());
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(captured.text).toBe(user.content);
@@ -249,7 +249,7 @@ describe("synthesizeOpeningContext — embedsExactUserMessageContent", () => {
 
   test("synthesize_embedsExactUserMessageContent_taskFire", async () => {
     const { deps, captured } = makeCaptureDeps();
-    const ctx = await synthesizeOpeningContext(deps, taskPayload, agent, defaultSignal);
+    const ctx = await synthesizeOpeningContext(deps, taskPayload, agent, makeDefaultSignal());
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(captured.text).toBe(user.content);

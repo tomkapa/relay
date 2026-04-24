@@ -278,6 +278,7 @@ async function finalizeSession(
 async function handleSessionStart(
   deps: HandlerDeps,
   item: WorkItem,
+  signal: AbortSignal,
 ): Promise<Result<void, HandlerError>> {
   return withSpan(
     SpanName.TriggerIngest,
@@ -312,7 +313,7 @@ async function handleSessionStart(
       if (!agentResult.ok) return err(mapAgentError(agentResult.error));
 
       const { chainId, depth } = mintChainAndDepth();
-      const synthSignal = AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS);
+      const synthSignal = AbortSignal.any([signal, AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS)]);
       const context = await synthesizeOpeningContext(
         { sql: deps.sql, clock: deps.clock, embedder: deps.embedder },
         payload,
@@ -392,6 +393,7 @@ async function readTaskRow(
 async function handleTaskFire(
   deps: HandlerDeps,
   item: WorkItem,
+  signal: AbortSignal,
 ): Promise<Result<void, HandlerError>> {
   return withSpan(
     SpanName.TriggerIngest,
@@ -412,7 +414,7 @@ async function handleTaskFire(
       if (!agentResult.ok) return err(mapAgentError(agentResult.error));
 
       const { chainId, depth } = mintChainAndDepth();
-      const synthSignal = AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS);
+      const synthSignal = AbortSignal.any([signal, AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS)]);
       const context = await synthesizeOpeningContext(
         { sql: deps.sql, clock: deps.clock, embedder: deps.embedder },
         payload,
@@ -575,8 +577,8 @@ async function handleInboundMessage(
 
 export function triggerHandlers(deps: HandlerDeps): Dispatcher {
   return {
-    session_start: (item) => handleSessionStart(deps, item),
-    task_fire: (item) => handleTaskFire(deps, item),
+    session_start: (item, signal) => handleSessionStart(deps, item, signal),
+    task_fire: (item, signal) => handleTaskFire(deps, item, signal),
     inbound_message: (item) => handleInboundMessage(deps, item),
   };
 }
