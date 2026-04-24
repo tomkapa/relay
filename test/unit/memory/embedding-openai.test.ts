@@ -1,10 +1,24 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type OpenAI from "openai";
 import { APIConnectionError, APIError } from "openai";
 import type { CreateEmbeddingResponse } from "openai/resources/embeddings.js";
 import { AssertionError } from "../../../src/core/assert.ts";
 import { EMBEDDING_DIM, MAX_EMBED_INPUT_BYTES } from "../../../src/memory/limits.ts";
 import { OpenAIEmbeddingClient } from "../../../src/memory/embedding-openai.ts";
+import { GenAiAttr, GenAiEvent, SpanName } from "../../../src/telemetry/otel.ts";
+import {
+  installSpanFixture,
+  uninstallSpanFixture,
+  findEvent,
+  type SpanFixture,
+} from "../../helpers/spans.ts";
+import {
+  histogramCount,
+  histogramSum,
+  installMetricFixture,
+  uninstallMetricFixture,
+  type MetricFixture,
+} from "../../helpers/metrics.ts";
 
 // --- SDK stub helpers ---
 
@@ -233,4 +247,55 @@ test("embed_recordsExceptionAndErrorStatus_onThrow", async () => {
     caught = e;
   }
   expect(caught).toBeInstanceOf(AssertionError);
+});
+
+// --- GenAI semconv instrumentation ---
+
+describe("embedding-openai GenAI semconv", () => {
+  let spans: SpanFixture;
+  let metrics: MetricFixture;
+
+  beforeEach(() => {
+    spans = installSpanFixture();
+    metrics = installMetricFixture();
+  });
+
+  afterEach(async () => {
+    await uninstallSpanFixture();
+    await uninstallMetricFixture();
+  });
+
+  test("embedding.call span carries gen_ai.* attributes and records token usage", async () => {
+    const client = new OpenAIEmbeddingClient({ apiKey: "k", sdk: makeGoodSDK() });
+    const result = await client.embed("hello world", noSignal);
+    expect(result.ok).toBe(true);
+
+    const s = spans.spansByName(SpanName.EmbeddingCall)[0];
+    expect(s).toBeDefined();
+    expect(s?.attributes[GenAiAttr.OperationName]).toBe("embeddings");
+    expect(s?.attributes[GenAiAttr.ProviderName]).toBe("openai");
+    expect(s?.attributes[GenAiAttr.RequestModel]).toBe("text-embedding-3-small");
+    expect(s?.attributes[GenAiAttr.EmbeddingsDimensionCount]).toBe(EMBEDDING_DIM);
+    expect(s?.attributes[GenAiAttr.UsageInputTokens]).toBe(3);
+
+    const ev = findEvent(s!, GenAiEvent.InferenceDetails);
+    expect(ev).toBeDefined();
+    const inputMsgs = JSON.parse(ev!.attributes!["gen_ai.input.messages"] as string) as unknown[];
+    expect(inputMsgs).toHaveLength(1);
+
+    const rm = await metrics.collect();
+    expect(
+      histogramCount(rm, "gen_ai.client.operation.duration", {
+        [GenAiAttr.OperationName]: "embeddings",
+        [GenAiAttr.ProviderName]: "openai",
+      }),
+    ).toBe(1);
+    expect(histogramSum(rm, "gen_ai.client.token.usage", { [GenAiAttr.TokenType]: "input" })).toBe(
+      3,
+    );
+    // No output tokens for embeddings.
+    expect(
+      histogramCount(rm, "gen_ai.client.token.usage", { [GenAiAttr.TokenType]: "output" }),
+    ).toBe(0);
+  });
 });

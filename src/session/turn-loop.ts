@@ -10,12 +10,16 @@ import type { AgentId, SessionId, TenantId } from "../ids.ts";
 import { TurnId, mintId } from "../ids.ts";
 import {
   Attr,
+  GenAiAttr,
+  GenAiEvent,
   SpanName,
   counter,
+  histogram,
   withSpan,
   type Attributes,
   type Counter,
 } from "../telemetry/otel.ts";
+import { MAX_GENAI_CONTENT_BYTES_PER_PART, truncateUtf8 } from "../telemetry/limits.ts";
 import type { ModelClient, ToolSchema } from "./model.ts";
 import { assertNever } from "../core/assert.ts";
 import { MODEL_CALL_TIMEOUT_MS, MAX_TURNS_PER_SESSION, TOOL_CALL_TIMEOUT_MS } from "./limits.ts";
@@ -89,6 +93,7 @@ async function callModel(
         [Attr.AgentId]: params.ctx.agentId,
         [Attr.TenantId]: params.ctx.tenantId,
         [Attr.TurnId]: params.ctx.turnId,
+        [GenAiAttr.ConversationId]: params.ctx.sessionId,
       },
       () =>
         model.complete({
@@ -120,14 +125,32 @@ async function invokeOneTool(
       [Attr.AgentId]: ctx.agentId,
       [Attr.TenantId]: ctx.tenantId,
       [Attr.TurnId]: ctx.turnId,
+      [GenAiAttr.OperationName]: "execute_tool",
+      [GenAiAttr.ToolName]: block.name,
+      [GenAiAttr.ToolType]: "function",
+      [GenAiAttr.ToolCallId]: block.id,
     },
-    () =>
-      tools.invoke({
+    async (span) => {
+      const argsT = truncateUtf8(JSON.stringify(block.input), MAX_GENAI_CONTENT_BYTES_PER_PART);
+      span.addEvent(GenAiEvent.ToolCallArguments, {
+        [GenAiAttr.ToolCallArguments]: argsT.text,
+        ...(argsT.truncated ? { [GenAiAttr.ContentTruncated]: true } : {}),
+      });
+      const result = await tools.invoke({
         name: block.name,
         input: block.input,
         ctx: { ...ctx, toolUseId: block.id },
         signal,
-      }),
+      });
+      const body = result.ok ? result.content : result.errorMessage;
+      const bodyT = truncateUtf8(body, MAX_GENAI_CONTENT_BYTES_PER_PART);
+      span.addEvent(GenAiEvent.ToolCallResult, {
+        [GenAiAttr.ToolCallResult]: bodyT.text,
+        [GenAiAttr.ToolCallIsError]: !result.ok,
+        ...(bodyT.truncated ? { [GenAiAttr.ContentTruncated]: true } : {}),
+      });
+      return result;
+    },
   );
 }
 
@@ -169,16 +192,31 @@ async function dispatchOneBlock(
     "dispatchTools: pre-tool-use stub must approve — deny arrives with RELAY-138",
   );
 
+  const toolDurationHist = histogram(
+    "relay.tool.invocation.duration",
+    "Per-tool invocation wall time. Outcome ∈ {invoked, tool_error, timeout}.",
+    "s",
+  );
+  const histAttrs = { ...toolAttrs, [GenAiAttr.ToolName]: block.name };
+
+  const startedAt = performance.now();
   let toolResult: ToolResult;
   try {
     toolResult = await invokeOneTool(tools, block, ctx, timeoutMs);
   } catch (e) {
+    const elapsedSec = (performance.now() - startedAt) / 1000;
     if (isAbortTimeout(e)) {
+      toolDurationHist.record(elapsedSec, { ...histAttrs, [Attr.Outcome]: "timeout" });
       toolCompletions.add(1, { ...toolAttrs, [Attr.Outcome]: "timeout" });
       return err({ kind: "timeout", stage: "tool" });
     }
     throw e; // programmer error from tool invoker — propagate, lease expires
   }
+  const elapsedSec = (performance.now() - startedAt) / 1000;
+  toolDurationHist.record(elapsedSec, {
+    ...histAttrs,
+    [Attr.Outcome]: toolResult.ok ? "invoked" : "tool_error",
+  });
 
   await callHookSeam(
     { ...toolAttrs, [Attr.HookEvent]: "post_tool_use" },

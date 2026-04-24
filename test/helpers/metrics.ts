@@ -70,3 +70,48 @@ export function sumCounter(
   }
   return total;
 }
+
+function matchesAttrs(dpAttrs: Record<string, unknown>, attrs: Record<string, string>): boolean {
+  for (const [k, v] of Object.entries(attrs)) {
+    if (dpAttrs[k] !== v) return false;
+  }
+  return true;
+}
+
+// Total observations across all data points for a histogram, optionally filtered.
+export function histogramCount(
+  rm: ResourceMetrics,
+  name: string,
+  attrs?: Record<string, string>,
+): number {
+  let total = 0;
+  for (const sm of rm.scopeMetrics) {
+    for (const metric of sm.metrics) {
+      if (metric.descriptor.name !== name) continue;
+      for (const dp of metric.dataPoints) {
+        if (attrs !== undefined && !matchesAttrs(dp.attributes, attrs)) continue;
+        total += (dp.value as { count: number }).count;
+      }
+    }
+  }
+  return total;
+}
+
+// Sum of all recorded values across matching histogram data points.
+export function histogramSum(
+  rm: ResourceMetrics,
+  name: string,
+  attrs?: Record<string, string>,
+): number {
+  let total = 0;
+  for (const sm of rm.scopeMetrics) {
+    for (const metric of sm.metrics) {
+      if (metric.descriptor.name !== name) continue;
+      for (const dp of metric.dataPoints) {
+        if (attrs !== undefined && !matchesAttrs(dp.attributes, attrs)) continue;
+        total += (dp.value as { sum: number }).sum;
+      }
+    }
+  }
+  return total;
+}

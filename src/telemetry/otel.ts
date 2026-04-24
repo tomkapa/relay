@@ -26,6 +26,21 @@ export const tracer: Tracer = trace.getTracer(INSTRUMENTATION_NAME, INSTRUMENTAT
 export const meter: Meter = metrics.getMeter(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
 export const logger: Logger = logs.getLogger(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
 
+let _testTracer: Tracer | undefined;
+
+// Resolve the tracer withSpan uses. Tests install a provider-backed tracer via
+// _setTracerForTest so they can read back spans and events; production uses the
+// module-const tracer. Mirrors _setMeterForTest.
+function resolveTracer(): Tracer {
+  return _testTracer ?? tracer;
+}
+
+// Install a test tracer so withSpan records to a controllable provider.
+// Pass undefined to restore production behavior. Never call in production code.
+export function _setTracerForTest(t: Tracer | undefined): void {
+  _testTracer = t;
+}
+
 export type { Attributes, Counter };
 
 // Stable, low-cardinality span names. Dynamic values go on attributes (CLAUDE.md §2).
@@ -98,6 +113,67 @@ export const Attr = {
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 
+// OpenTelemetry GenAI semantic-convention attributes. Separate namespace from `relay.*`:
+// these are spec-defined keys that Honeycomb (and any other OTel backend) recognizes
+// for GenAI workloads. See https://opentelemetry.io/docs/specs/semconv/gen-ai/.
+export const GenAiAttr = {
+  OperationName: "gen_ai.operation.name", // chat | embeddings | execute_tool | …
+  ProviderName: "gen_ai.provider.name", // anthropic | openai | …
+  RequestModel: "gen_ai.request.model",
+  RequestMaxTokens: "gen_ai.request.max_tokens",
+  RequestTemperature: "gen_ai.request.temperature",
+  RequestTopP: "gen_ai.request.top_p",
+  RequestStopSequences: "gen_ai.request.stop_sequences",
+  ResponseModel: "gen_ai.response.model",
+  ResponseId: "gen_ai.response.id",
+  ResponseFinishReasons: "gen_ai.response.finish_reasons",
+  UsageInputTokens: "gen_ai.usage.input_tokens",
+  UsageOutputTokens: "gen_ai.usage.output_tokens",
+  UsageCacheReadInputTokens: "gen_ai.usage.cache_read.input_tokens",
+  UsageCacheCreationInputTokens: "gen_ai.usage.cache_creation.input_tokens",
+  UsageThinkingTokens: "gen_ai.usage.thinking_tokens",
+  ConversationId: "gen_ai.conversation.id",
+  ToolName: "gen_ai.tool.name",
+  ToolType: "gen_ai.tool.type",
+  ToolCallId: "gen_ai.tool.call.id",
+  TokenType: "gen_ai.token.type", // input | output — metric attribute
+  EmbeddingsDimensionCount: "gen_ai.embeddings.dimension.count",
+  // Event-body attributes (carried on span events, not on the span itself) —
+  // named here so we never hand-roll the strings at call sites.
+  SystemInstructions: "gen_ai.system_instructions",
+  InputMessages: "gen_ai.input.messages",
+  OutputMessages: "gen_ai.output.messages",
+  ToolDefinitions: "gen_ai.tool.definitions",
+  ToolCallArguments: "gen_ai.tool.call.arguments",
+  ToolCallResult: "gen_ai.tool.call.result",
+  ToolCallIsError: "gen_ai.tool.call.is_error",
+  ThinkingIndex: "gen_ai.thinking.index",
+  ThinkingText: "gen_ai.thinking.text",
+  ThinkingSignature: "gen_ai.thinking.signature",
+  ThinkingBlockBytes: "gen_ai.thinking.bytes",
+  ThinkingRedacted: "gen_ai.thinking.redacted",
+  ThinkingTruncated: "gen_ai.thinking.truncated",
+  // Relay-local accounting for thinking blocks — not part of the spec but namespaced
+  // so they do not collide with future spec additions.
+  ThinkingBlockCount: "relay.genai.thinking.block_count",
+  ThinkingBytes: "relay.genai.thinking.bytes",
+  ContentTruncated: "relay.genai.content.truncated",
+  ErrorType: "error.type",
+} as const;
+export type GenAiAttr = (typeof GenAiAttr)[keyof typeof GenAiAttr];
+
+// GenAI span-event names. The details event carries the consolidated messages payload
+// (system_instructions + input.messages + output.messages + tool.definitions). Thinking
+// and tool call args/result are separate events so they can be filtered at the Collector
+// or dropped by a tail sampler without losing the structured call summary.
+export const GenAiEvent = {
+  InferenceDetails: "gen_ai.client.inference.operation.details",
+  Thinking: "gen_ai.thinking",
+  ToolCallArguments: "gen_ai.tool.call.arguments",
+  ToolCallResult: "gen_ai.tool.call.result",
+} as const;
+export type GenAiEvent = (typeof GenAiEvent)[keyof typeof GenAiEvent];
+
 // Run `fn` inside an active span. On throw: records exception AND sets ERROR status (both —
 // one without the other is a bug per CLAUDE.md §2). Span ends on every path via finally.
 export async function withSpan<T>(
@@ -105,7 +181,7 @@ export async function withSpan<T>(
   attributes: Attributes,
   fn: (span: Span) => Promise<T>,
 ): Promise<T> {
-  return tracer.startActiveSpan(name, { attributes }, async (span) => {
+  return resolveTracer().startActiveSpan(name, { attributes }, async (span) => {
     try {
       return await fn(span);
     } catch (e) {
@@ -116,6 +192,15 @@ export async function withSpan<T>(
       span.end();
     }
   });
+}
+
+// Currently-active span (the one withSpan most recently opened in this async context),
+// or undefined if none. Instrumentation helpers that enrich an already-open span (e.g.
+// GenAI attribute and event emission inside model.call) read the span via this helper
+// rather than import @opentelemetry/api directly — keeps the otel facade the single
+// boundary (CLAUDE.md §2).
+export function currentSpan(): Span | undefined {
+  return trace.getActiveSpan();
 }
 
 // ---------------------------------------------------------------------------
