@@ -11,6 +11,7 @@ import {
   AgentId as AgentIdParser,
   SessionId as SessionIdParser,
   TenantId as TenantIdParser,
+  ToolUseId,
 } from "../../../src/ids.ts";
 import type { AgentId, SessionId, TenantId } from "../../../src/ids.ts";
 import type { ModelClient } from "../../../src/session/model.ts";
@@ -56,7 +57,9 @@ function textResponse(text: string): ModelResponse {
 }
 
 function toolUseResponse(id: string, name: string, input: Record<string, unknown>): ModelResponse {
-  const toolBlock: ToolUseBlock = { type: "tool_use", id, name, input };
+  const parsed = ToolUseId.parse(id);
+  assert(parsed.ok, "toolUseResponse: invalid id");
+  const toolBlock: ToolUseBlock = { type: "tool_use", id: parsed.value, name, input };
   return {
     content: [toolBlock],
     stopReason: "tool_use",
@@ -253,7 +256,8 @@ describeOrSkip("runTurnLoop (integration)", () => {
       await sql`INSERT INTO agents (id, tenant_id, system_prompt) VALUES (${agentId}, ${tenantId}, 'sys')`;
       const sessionId = await insertSession(sql, agentId, tenantId);
 
-      const toolUseId = "tc_remember_1";
+      const toolUseId = ToolUseId.parse("tc_remember_1");
+      assert(toolUseId.ok, "integration test: invalid toolUseId");
       let callCount = 0;
       const model: ModelClient = {
         complete: () => {
@@ -261,7 +265,7 @@ describeOrSkip("runTurnLoop (integration)", () => {
           if (callCount === 1) {
             const toolBlock: ToolUseBlock = {
               type: "tool_use",
-              id: toolUseId,
+              id: toolUseId.value,
               name: "remember",
               input: { text: "the user likes cats" },
             };

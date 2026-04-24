@@ -9,6 +9,7 @@ import {
   AgentId as AgentIdParser,
   SessionId as SessionIdParser,
   TenantId as TenantIdParser,
+  ToolUseId,
   TurnId as TurnIdParser,
 } from "../../../src/ids.ts";
 import type { EmbedError, EmbeddingClient } from "../../../src/memory/embedding.ts";
@@ -75,7 +76,7 @@ function makeCtx(): ToolInvocationContext {
     agentId: parseId(AgentIdParser.parse, randomUUID()),
     tenantId: parseId(TenantIdParser.parse, randomUUID()),
     turnId: parseId(TurnIdParser.parse, randomUUID()),
-    toolUseId: `tool_use_${randomUUID()}`,
+    toolUseId: parseId(ToolUseId.parse, `tool_use_${randomUUID()}`),
   };
 }
 

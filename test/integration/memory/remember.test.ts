@@ -5,7 +5,11 @@ import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import postgres, { type Sql } from "postgres";
 import { assert } from "../../../src/core/assert.ts";
-import { SessionId as SessionIdParser, TurnId as TurnIdParser } from "../../../src/ids.ts";
+import {
+  SessionId as SessionIdParser,
+  ToolUseId,
+  TurnId as TurnIdParser,
+} from "../../../src/ids.ts";
 import type { AgentId, TenantId } from "../../../src/ids.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
 import { idempotencyKey } from "../../../src/core/idempotency.ts";
@@ -41,7 +45,11 @@ function makeCtx(agentId: AgentId, tenantId: TenantId): ToolInvocationContext {
     agentId,
     tenantId,
     turnId: turn.value,
-    toolUseId: `tc_${randomUUID()}`,
+    toolUseId: (() => {
+      const r = ToolUseId.parse(`tc_${randomUUID()}`);
+      assert(r.ok, "fixture: invalid toolUseId");
+      return r.value;
+    })(),
   };
 }
 

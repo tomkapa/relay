@@ -1,18 +1,18 @@
 // Turn-level types: content blocks, messages, model response, and error union.
 // One error union per boundary (CLAUDE.md §12). Exhaustive switch at the worker harness.
 
-import type { TurnId } from "../ids.ts";
+import type { ToolUseId, TurnId } from "../ids.ts";
 
 export type TextBlock = { readonly type: "text"; readonly text: string };
 export type ToolUseBlock = {
   readonly type: "tool_use";
-  readonly id: string; // not branded — reused as tool_call_id in RELAY-74
+  readonly id: ToolUseId; // opaque model-assigned id, passed verbatim as tool_call_id (RELAY-74)
   readonly name: string;
   readonly input: Readonly<Record<string, unknown>>;
 };
 export type ToolResultBlock = {
   readonly type: "tool_result";
-  readonly toolUseId: string;
+  readonly toolUseId: ToolUseId;
   readonly content: string; // JSON-stringified output, or error text when isError
   readonly isError?: boolean;
 };
@@ -54,7 +54,7 @@ export type Turn = {
 
 export type TurnLoopError =
   | { kind: "model_call_failed"; detail: string }
-  | { kind: "tool_invocation_failed"; toolName: string; toolUseId: string; detail: string }
+  | { kind: "tool_invocation_failed"; toolName: string; toolUseId: ToolUseId; detail: string }
   | { kind: "tool_unknown"; toolName: string }
   | { kind: "turn_cap_exceeded"; max: number }
   | { kind: "timeout"; stage: "model" | "tool" }

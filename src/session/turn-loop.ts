@@ -8,7 +8,14 @@ import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import type { AgentId, SessionId, TenantId } from "../ids.ts";
 import { TurnId, mintId } from "../ids.ts";
-import { Attr, SpanName, counter, withSpan } from "../telemetry/otel.ts";
+import {
+  Attr,
+  SpanName,
+  counter,
+  withSpan,
+  type Attributes,
+  type Counter,
+} from "../telemetry/otel.ts";
 import type { ModelClient, ToolSchema } from "./model.ts";
 import { assertNever } from "../core/assert.ts";
 import { MODEL_CALL_TIMEOUT_MS, MAX_TURNS_PER_SESSION, TOOL_CALL_TIMEOUT_MS } from "./limits.ts";
@@ -19,15 +26,19 @@ import type {
   Message,
   ModelResponse,
   ToolResultBlock,
+  ToolUseBlock,
   Turn,
   TurnLoopError,
 } from "./turn.ts";
+import type { HookResult, HookSeams } from "../hook/types.ts";
+import { preToolUseStub, postToolUseStub } from "../hook/stubs.ts";
 
 type LoopDeps = {
   readonly sql: Sql;
   readonly clock: Clock;
   readonly model: ModelClient;
   readonly tools: ToolRegistry;
+  readonly hooks?: HookSeams;
   readonly maxTurns?: number;
   readonly modelTimeoutMs?: number;
   readonly toolTimeoutMs?: number;
@@ -96,7 +107,7 @@ async function callModel(
 
 async function invokeOneTool(
   tools: ToolRegistry,
-  block: { id: string; name: string; input: Readonly<Record<string, unknown>> },
+  block: ToolUseBlock,
   ctx: TurnCtx,
   timeoutMs: number,
 ): Promise<ToolResult> {
@@ -120,12 +131,84 @@ async function invokeOneTool(
   );
 }
 
+async function callHookSeam(
+  hookAttrs: Attributes,
+  hookFn: () => Promise<HookResult>,
+  evals: Counter,
+  assertMsg: string,
+): Promise<void> {
+  const result = await withSpan(SpanName.HookEvaluate, hookAttrs, hookFn);
+  evals.add(1, {
+    ...hookAttrs,
+    [Attr.HookDecision]: result.decision,
+    [Attr.HookLayer]: "system",
+  });
+  assert(result.decision === "approve", assertMsg);
+}
+
+async function dispatchOneBlock(
+  tools: ToolRegistry,
+  block: ToolUseBlock,
+  ctx: TurnCtx,
+  timeoutMs: number,
+  hooks: HookSeams,
+  toolAttrs: Attributes,
+  toolCompletions: Counter,
+  hookEvaluations: Counter,
+): Promise<Result<ToolResultBlock, TurnLoopError>> {
+  await callHookSeam(
+    { ...toolAttrs, [Attr.HookEvent]: "pre_tool_use" },
+    () =>
+      hooks.preToolUse({
+        ...ctx,
+        toolUseId: block.id,
+        toolName: block.name,
+        toolInput: block.input,
+      }),
+    hookEvaluations,
+    "dispatchTools: pre-tool-use stub must approve — deny arrives with RELAY-138",
+  );
+
+  let toolResult: ToolResult;
+  try {
+    toolResult = await invokeOneTool(tools, block, ctx, timeoutMs);
+  } catch (e) {
+    if (isAbortTimeout(e)) {
+      toolCompletions.add(1, { ...toolAttrs, [Attr.Outcome]: "timeout" });
+      return err({ kind: "timeout", stage: "tool" });
+    }
+    throw e; // programmer error from tool invoker — propagate, lease expires
+  }
+
+  await callHookSeam(
+    { ...toolAttrs, [Attr.HookEvent]: "post_tool_use" },
+    () =>
+      hooks.postToolUse({
+        ...ctx,
+        toolUseId: block.id,
+        toolName: block.name,
+        outcome: toolResult.ok ? "invoked" : "tool_error",
+      }),
+    hookEvaluations,
+    "dispatchTools: post-tool-use stub must approve — deny arrives with RELAY-138",
+  );
+
+  toolCompletions.add(1, { ...toolAttrs, [Attr.Outcome]: "invoked" });
+  return ok({
+    type: "tool_result",
+    toolUseId: block.id,
+    content: toolResult.ok ? toolResult.content : toolResult.errorMessage,
+    ...(toolResult.ok ? {} : { isError: true as const }),
+  });
+}
+
 async function dispatchTools(
   tools: ToolRegistry,
   content: readonly ContentBlock[],
   toolSchemas: readonly ToolSchema[],
   ctx: TurnCtx,
   timeoutMs: number,
+  hooks: HookSeams,
 ): Promise<Result<readonly ToolResultBlock[], TurnLoopError>> {
   const toolIterations = counter(
     "relay.tool.dispatch_iteration_total",
@@ -134,6 +217,10 @@ async function dispatchTools(
   const toolCompletions = counter(
     "relay.tool.dispatch_completion_total",
     "Per tool_use outcome. relay.outcome ∈ {invoked, tool_unknown, timeout}.",
+  );
+  const hookEvaluations = counter(
+    "relay.hook.evaluation_total",
+    "Hook evaluations per lifecycle event. relay.hook.event ∈ {pre_tool_use, post_tool_use}.",
   );
 
   const available = new Set(toolSchemas.map((s) => s.name));
@@ -156,31 +243,25 @@ async function dispatchTools(
       return err({ kind: "tool_unknown", toolName: block.name });
     }
 
-    let toolResult: ToolResult;
-    try {
-      toolResult = await invokeOneTool(tools, block, ctx, timeoutMs);
-    } catch (e) {
-      if (isAbortTimeout(e)) {
-        toolCompletions.add(1, { ...toolAttrs, [Attr.Outcome]: "timeout" });
-        return err({ kind: "timeout", stage: "tool" });
-      }
-      throw e; // programmer error from tool invoker — propagate, lease expires
-    }
-
-    toolCompletions.add(1, { ...toolAttrs, [Attr.Outcome]: "invoked" });
-    results.push({
-      type: "tool_result",
-      toolUseId: block.id,
-      content: toolResult.ok ? toolResult.content : toolResult.errorMessage,
-      ...(toolResult.ok ? {} : { isError: true as const }),
-    });
+    const r = await dispatchOneBlock(
+      tools,
+      block,
+      ctx,
+      timeoutMs,
+      hooks,
+      toolAttrs,
+      toolCompletions,
+      hookEvaluations,
+    );
+    if (!r.ok) return r;
+    results.push(r.value);
   }
 
   return ok(results);
 }
 
 async function runOneTurn(
-  deps: { model: ModelClient; tools: ToolRegistry; clock: Clock },
+  deps: { model: ModelClient; tools: ToolRegistry; clock: Clock; hooks: HookSeams },
   input: OneTurnInput,
 ): Promise<Result<Turn, TurnLoopError>> {
   const turnId = mintId(TurnId.parse, "runOneTurn");
@@ -219,6 +300,7 @@ async function runOneTurn(
         input.toolSchemas,
         ctx,
         input.toolTimeoutMs,
+        deps.hooks,
       );
       if (!toolsResult.ok) return toolsResult;
 
@@ -248,6 +330,10 @@ export async function runTurnLoop(
 
   const modelTimeoutMs = deps.modelTimeoutMs ?? MODEL_CALL_TIMEOUT_MS;
   const toolTimeoutMs = deps.toolTimeoutMs ?? TOOL_CALL_TIMEOUT_MS;
+  const hooks: HookSeams = deps.hooks ?? {
+    preToolUse: preToolUseStub,
+    postToolUse: postToolUseStub,
+  };
   const messages: Message[] = [...input.initialMessages];
   const turns: Turn[] = [];
   const toolSchemas = deps.tools.list();
@@ -270,7 +356,7 @@ export async function runTurnLoop(
     turnIterations.add(1, baseAttrs);
 
     const turnResult = await runOneTurn(
-      { model: deps.model, tools: deps.tools, clock: deps.clock },
+      { model: deps.model, tools: deps.tools, clock: deps.clock, hooks },
       {
         index: i,
         sessionId: input.sessionId,
