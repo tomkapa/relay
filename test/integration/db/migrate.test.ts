@@ -83,6 +83,21 @@ describeOrSkip("migrate (integration)", () => {
       expect(names.has("sessions_chain_id_idx")).toBe(true);
       expect(names.has("sessions_source_work_item_idx")).toBe(true);
 
+      const memoryTable = await sql<{ exists: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name = 'memory'
+        ) AS exists
+      `;
+      expect(memoryTable[0]?.exists).toBe(true);
+
+      const memoryIdx = await sql<{ indexname: string }[]>`
+        SELECT indexname FROM pg_indexes WHERE tablename = 'memory'
+      `;
+      const memoryIdxNames = new Set(memoryIdx.map((r) => r.indexname));
+      expect(memoryIdxNames.has("memory_tenant_idx")).toBe(true);
+      expect(memoryIdxNames.has("memory_agent_kind_idx")).toBe(true);
+
       const envelopeTable = await sql<{ exists: boolean }[]>`
         SELECT EXISTS (
           SELECT 1 FROM information_schema.tables

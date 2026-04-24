@@ -13,6 +13,7 @@ export async function resetDb(s: Sql): Promise<void> {
     DROP TABLE IF EXISTS turns CASCADE;
     DROP TABLE IF EXISTS trigger_envelopes CASCADE;
     DROP TABLE IF EXISTS work_queue CASCADE;
+    DROP TABLE IF EXISTS memory CASCADE;
     DROP TABLE IF EXISTS tasks CASCADE;
     DROP TABLE IF EXISTS sessions CASCADE;
     DROP TABLE IF EXISTS agents CASCADE;
