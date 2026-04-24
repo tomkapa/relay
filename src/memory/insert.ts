@@ -3,6 +3,7 @@
 
 import type { TransactionSql } from "postgres";
 import { assert } from "../core/assert.ts";
+import { assertValidKeyFormat, type IdempotencyKey } from "../core/idempotency.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
 import {
@@ -14,9 +15,11 @@ import {
   type MemoryId as MemoryIdBrand,
   type TenantId as TenantIdBrand,
 } from "../ids.ts";
-import { Attr, SpanName, withSpan } from "../telemetry/otel.ts";
+import { Attr, SpanName, counter, withSpan } from "../telemetry/otel.ts";
 import { EMBEDDING_DIM, MAX_ENTRY_TEXT_BYTES } from "./limits.ts";
 import type { MemoryKind } from "./kind.ts";
+
+export const WRITER = "memory.write";
 
 export type InsertMemoryInput = {
   readonly agentId: AgentId;
@@ -25,6 +28,7 @@ export type InsertMemoryInput = {
   readonly text: string;
   readonly embedding: Float32Array;
   readonly importance: Importance;
+  readonly idempotencyKey: IdempotencyKey;
 };
 
 export type MemoryRow = {
@@ -61,6 +65,22 @@ type MemoryDbRow = {
   readonly retrieval_count: number;
 };
 
+function toDomain(row: MemoryDbRow, kind: MemoryKind): MemoryRow {
+  const parsedId = MemoryId.parse(row.id);
+  assert(parsedId.ok, "insertMemory: id from DB is invalid", { id: row.id });
+  return {
+    id: parsedId.value,
+    agentId: row.agent_id as AgentId,
+    tenantId: row.tenant_id as TenantIdBrand,
+    kind,
+    text: row.text,
+    importance: row.importance as Importance,
+    createdAt: row.created_at,
+    lastRetrievedAt: row.last_retrieved_at,
+    retrievalCount: row.retrieval_count,
+  };
+}
+
 export async function insertMemory(
   tx: TransactionSql,
   input: InsertMemoryInput,
@@ -69,6 +89,7 @@ export async function insertMemory(
     got: input.embedding.length,
     expected: EMBEDDING_DIM,
   });
+  assertValidKeyFormat(input.idempotencyKey);
 
   const bytes = Buffer.byteLength(input.text, "utf8");
   if (bytes > MAX_ENTRY_TEXT_BYTES) {
@@ -108,7 +129,7 @@ export async function insertMemory(
       const embeddingStr = `[${input.embedding.join(",")}]`;
 
       const rows = await tx<MemoryDbRow[]>`
-        INSERT INTO memory (id, tenant_id, agent_id, kind, text, embedding, importance)
+        INSERT INTO memory (id, tenant_id, agent_id, kind, text, embedding, importance, idempotency_key)
         VALUES (
           ${id},
           ${input.tenantId},
@@ -116,28 +137,32 @@ export async function insertMemory(
           ${input.kind as string},
           ${input.text},
           ${embeddingStr}::vector,
-          ${input.importance as number}
+          ${input.importance as number},
+          ${input.idempotencyKey}
         )
+        ON CONFLICT (idempotency_key) DO NOTHING
         RETURNING id, agent_id, tenant_id, kind, text, importance,
                   created_at, last_retrieved_at, retrieval_count
       `;
 
+      if (rows.length === 0) {
+        const existing = await tx<MemoryDbRow[]>`
+          SELECT id, agent_id, tenant_id, kind, text, importance,
+                 created_at, last_retrieved_at, retrieval_count
+          FROM memory WHERE idempotency_key = ${input.idempotencyKey}
+        `;
+        // The unique constraint + ON CONFLICT guarantees a row exists here; its absence
+        // would mean the constraint fired without a matching row — a DB bug, assert.
+        const row = firstRow(existing, "insertMemory.dedup.select");
+        counter("relay.memory.write.dedup_hit_total").add(1, {
+          [Attr.TenantId]: input.tenantId,
+          [Attr.AgentId]: input.agentId,
+        });
+        return ok(toDomain(row, input.kind));
+      }
+
       const row = firstRow(rows, "insertMemory.insert");
-
-      const parsedId = MemoryId.parse(row.id);
-      assert(parsedId.ok, "insertMemory: id from DB is invalid", { id: row.id });
-
-      return ok({
-        id: parsedId.value,
-        agentId: row.agent_id as AgentId,
-        tenantId: row.tenant_id as TenantIdBrand,
-        kind: input.kind,
-        text: row.text,
-        importance: row.importance as Importance,
-        createdAt: row.created_at,
-        lastRetrievedAt: row.last_retrieved_at,
-        retrievalCount: row.retrieval_count,
-      });
+      return ok(toDomain(row, input.kind));
     },
   );
 }

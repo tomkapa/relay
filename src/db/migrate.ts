@@ -5,8 +5,8 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { assert } from "../core/assert.ts";
+import { sha256Hex } from "../core/hash.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { MAX_MIGRATION_FILENAME_LEN } from "./limits.ts";
 
@@ -70,9 +70,7 @@ export function parseMigrationFilename(
   return ok({ version, name });
 }
 
-export function sha256Hex(s: string): string {
-  return createHash("sha256").update(s).digest("hex");
-}
+export { sha256Hex } from "../core/hash.ts";
 
 export async function loadMigrations(
   dir: string,

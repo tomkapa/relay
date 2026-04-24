@@ -5,12 +5,20 @@ import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import postgres, { type Sql } from "postgres";
 import { AssertionError, assert } from "../../../src/core/assert.ts";
+import type { IdempotencyKey } from "../../../src/core/idempotency.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
 import { AgentId, Importance, MemoryId, TenantId } from "../../../src/ids.ts";
 import { insertMemory } from "../../../src/memory/insert.ts";
 import { MemoryKind } from "../../../src/memory/kind.ts";
 import { EMBEDDING_DIM, MAX_ENTRY_TEXT_BYTES } from "../../../src/memory/limits.ts";
-import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
+import {
+  DB_URL,
+  HOOK_TIMEOUT_MS,
+  MIGRATIONS_DIR,
+  describeOrSkip,
+  makeTestKey,
+  resetDb,
+} from "../helpers.ts";
 
 let sqlRef: Sql | undefined;
 
@@ -95,7 +103,15 @@ describeOrSkip("insertMemory (integration)", () => {
       const embedding = makeEmbedding(1);
 
       const result = await sql.begin((tx) =>
-        insertMemory(tx, { agentId, tenantId, kind, text, embedding, importance }),
+        insertMemory(tx, {
+          agentId,
+          tenantId,
+          kind,
+          text,
+          embedding,
+          importance,
+          idempotencyKey: makeTestKey(),
+        }),
       );
 
       expect(result.ok).toBe(true);
@@ -131,7 +147,15 @@ describeOrSkip("insertMemory (integration)", () => {
       const embedding = makeEmbedding(2);
 
       const result = await sql.begin((tx) =>
-        insertMemory(tx, { agentId, tenantId, kind, text, embedding, importance }),
+        insertMemory(tx, {
+          agentId,
+          tenantId,
+          kind,
+          text,
+          embedding,
+          importance,
+          idempotencyKey: makeTestKey(),
+        }),
       );
 
       expect(result.ok).toBe(true);
@@ -163,7 +187,15 @@ describeOrSkip("insertMemory (integration)", () => {
       const embedding = makeEmbedding();
 
       const result = await sql.begin((tx) =>
-        insertMemory(tx, { agentId, tenantId: callerTenantId, kind, text, embedding, importance }),
+        insertMemory(tx, {
+          agentId,
+          tenantId: callerTenantId,
+          kind,
+          text,
+          embedding,
+          importance,
+          idempotencyKey: makeTestKey(),
+        }),
       );
 
       expect(result.ok).toBe(false);
@@ -193,7 +225,15 @@ describeOrSkip("insertMemory (integration)", () => {
       const embedding = makeEmbedding();
 
       const result = await sql.begin((tx) =>
-        insertMemory(tx, { agentId, tenantId, kind, text, embedding, importance }),
+        insertMemory(tx, {
+          agentId,
+          tenantId,
+          kind,
+          text,
+          embedding,
+          importance,
+          idempotencyKey: makeTestKey(),
+        }),
       );
 
       expect(result.ok).toBe(false);
@@ -231,6 +271,7 @@ describeOrSkip("insertMemory (integration)", () => {
           text: oversizeText,
           embedding,
           importance,
+          idempotencyKey: makeTestKey(),
         }),
       );
 
@@ -264,6 +305,135 @@ describeOrSkip("insertMemory (integration)", () => {
             text: "some text",
             embedding: wrongEmbedding,
             importance,
+            idempotencyKey: makeTestKey(),
+          }),
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(AssertionError);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "insertMemory_dedupReturnsOriginalRowOnSameKey: repeat call with same key returns original row",
+    async () => {
+      const sql = requireSql();
+      const tenantIdStr = randomUUID();
+      const agentIdStr = randomUUID();
+      await insertAgent(sql, agentIdStr, tenantIdStr);
+
+      const tenantId = parseTenantId(tenantIdStr);
+      const agentId = parseAgentId(agentIdStr);
+      const kind = parseKind("event");
+      const importance = parseImportance(0.6);
+      const key = makeTestKey();
+
+      const first = await sql.begin((tx) =>
+        insertMemory(tx, {
+          agentId,
+          tenantId,
+          kind,
+          text: "first text",
+          embedding: makeEmbedding(1),
+          importance,
+          idempotencyKey: key,
+        }),
+      );
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+
+      const second = await sql.begin((tx) =>
+        insertMemory(tx, {
+          agentId,
+          tenantId,
+          kind,
+          text: "second text",
+          embedding: makeEmbedding(2),
+          importance,
+          idempotencyKey: key,
+        }),
+      );
+      expect(second.ok).toBe(true);
+      if (!second.ok) return;
+
+      expect(second.value.id as string).toBe(first.value.id as string);
+      expect(second.value.text).toBe("first text");
+
+      const rows = await sql<{ n: string }[]>`SELECT count(*) AS n FROM memory`;
+      expect(Number(rows[0]?.n)).toBe(1);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "insertMemory_differentKeysWriteSeparateRows: distinct keys produce distinct rows",
+    async () => {
+      const sql = requireSql();
+      const tenantIdStr = randomUUID();
+      const agentIdStr = randomUUID();
+      await insertAgent(sql, agentIdStr, tenantIdStr);
+
+      const tenantId = parseTenantId(tenantIdStr);
+      const agentId = parseAgentId(agentIdStr);
+      const kind = parseKind("fact");
+      const importance = parseImportance(0.8);
+
+      const r1 = await sql.begin((tx) =>
+        insertMemory(tx, {
+          agentId,
+          tenantId,
+          kind,
+          text: "fact one",
+          embedding: makeEmbedding(1),
+          importance,
+          idempotencyKey: makeTestKey(),
+        }),
+      );
+      const r2 = await sql.begin((tx) =>
+        insertMemory(tx, {
+          agentId,
+          tenantId,
+          kind,
+          text: "fact two",
+          embedding: makeEmbedding(2),
+          importance,
+          idempotencyKey: makeTestKey(),
+        }),
+      );
+
+      expect(r1.ok).toBe(true);
+      expect(r2.ok).toBe(true);
+      if (!r1.ok || !r2.ok) return;
+      expect(r1.value.id as string).not.toBe(r2.value.id as string);
+
+      const rows = await sql<{ n: string }[]>`SELECT count(*) AS n FROM memory`;
+      expect(Number(rows[0]?.n)).toBe(2);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "insertMemory_assertsMalformedKey: non-hex idempotencyKey throws AssertionError",
+    async () => {
+      const sql = requireSql();
+      const tenantId = parseTenantId(randomUUID());
+      const agentId = parseAgentId(randomUUID());
+      const kind = parseKind("event");
+      const importance = parseImportance(0.5);
+
+      let caught: unknown;
+      try {
+        await sql.begin((tx) =>
+          insertMemory(tx, {
+            agentId,
+            tenantId,
+            kind,
+            text: "x",
+            embedding: makeEmbedding(),
+            importance,
+            idempotencyKey: "" as unknown as IdempotencyKey,
           }),
         );
       } catch (e) {
