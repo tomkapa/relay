@@ -87,6 +87,8 @@ export const Attr = {
   EmbeddingModel: "relay.embedding.model",
   EmbeddingDim: "relay.embedding.dim",
   EmbeddingInputBytes: "relay.embedding.input_bytes",
+  MemoryInjectedCount: "relay.memory.injected_count",
+  MemoryInjectionSkipped: "relay.memory.injection.skipped_reason",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 

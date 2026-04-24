@@ -44,3 +44,14 @@ export const EMBEDDING_CALL_TIMEOUT_MS = 10_000;
 // on the same boundary as the writer — vector space stays consistent with stored text.
 // OpenAI's hard limit is ~8192 tokens (~30 KB); 8 KB leaves generous headroom.
 export const MAX_EMBED_INPUT_BYTES = MAX_ENTRY_TEXT_BYTES;
+
+// Max memories injected into the opening prompt. Higher → richer context, more tokens spent
+// before the agent starts. 8 is a defensible default: enough to cover several distinct facts
+// without dominating a small system prompt. Tuning is RELAY-219's concern (HNSW + recall).
+export const MAX_MEMORY_INJECTION = 8;
+
+// UTF-8 byte cap on the rendered memory preamble (heading + bullets, before the user message).
+// Keeps the opening prompt bounded even when individual memories are long. CLAUDE §5 — every
+// string crossing a trust boundary has a length cap. Conservative relative to a typical 8K
+// system-prompt budget; tighten only after we have token-aware measurement.
+export const MAX_MEMORY_PREAMBLE_BYTES = 4 * 1024;
