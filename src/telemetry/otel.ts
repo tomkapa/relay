@@ -44,6 +44,7 @@ export const SpanName = {
   SessionClose: "session.close",
   SessionSyncDispatch: "session.sync.dispatch",
   HttpTriggerPost: "http.trigger.post",
+  EmbeddingCall: "embedding.call",
 } as const;
 export type SpanName = (typeof SpanName)[keyof typeof SpanName];
 
@@ -77,6 +78,9 @@ export const Attr = {
   Outcome: "relay.outcome",
   EnvelopeId: "relay.envelope.id",
   MemoryKind: "relay.memory.kind",
+  EmbeddingModel: "relay.embedding.model",
+  EmbeddingDim: "relay.embedding.dim",
+  EmbeddingInputBytes: "relay.embedding.input_bytes",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 
