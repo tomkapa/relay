@@ -38,6 +38,9 @@ coveragePathIgnorePatterns = [
   "src/trigger/envelope-ops.ts",
   # Trigger handlers — DB-dependent shell, covered by test/integration/trigger/handlers.test.ts.
   "src/trigger/handlers.ts",
+  # Trigger synthesizer — memory injection path requires real pgvector + embed success;
+  # covered by test/integration/trigger/synthesize.test.ts. Pure helpers are unit-tested.
+  "src/trigger/synthesize.ts",
   # Inbound ops — DB shell, covered by test/integration/trigger/handlers.test.ts.
   "src/trigger/inbound/inbound-ops.ts",
   # HTTP layer — exercised end-to-end by test/integration/http/agents.test.ts with real Postgres.

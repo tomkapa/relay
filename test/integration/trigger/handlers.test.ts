@@ -25,6 +25,7 @@ import { MAX_ENVELOPE_BYTES } from "../../../src/trigger/limits.ts";
 import type { ModelClient } from "../../../src/session/model.ts";
 import type { ModelResponse } from "../../../src/session/turn.ts";
 import { InMemoryToolRegistry } from "../../../src/session/tools-inmemory.ts";
+import { FakeEmbeddingClient } from "../../fakes/embedding-fake.ts";
 
 let sqlRef: Sql | undefined;
 
@@ -122,7 +123,13 @@ function endTurnModel(): ModelClient {
 }
 
 function fakeDeps(sql: Sql, clock: FakeClock, model: ModelClient = endTurnModel()): HandlerDeps {
-  return { sql, clock, model, tools: new InMemoryToolRegistry([]) };
+  return {
+    sql,
+    clock,
+    model,
+    tools: new InMemoryToolRegistry([]),
+    embedder: new FakeEmbeddingClient({ error: { kind: "transient", message: "test" } }),
+  };
 }
 
 beforeAll(async () => {

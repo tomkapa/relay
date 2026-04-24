@@ -33,6 +33,8 @@ import { parseInboundMessageRow } from "./inbound/payload.ts";
 import type { InboundPayloadError } from "./inbound/payload.ts";
 import { loadOpenTargetSession } from "../session/load-open.ts";
 import type { TargetSessionError } from "../session/load-open.ts";
+import type { EmbeddingClient } from "../memory/embedding.ts";
+import { EMBEDDING_CALL_TIMEOUT_MS } from "../memory/limits.ts";
 import type { ModelClient } from "../session/model.ts";
 import type { ToolRegistry } from "../session/tools.ts";
 import { runTurnLoop } from "../session/turn-loop.ts";
@@ -46,6 +48,7 @@ export type HandlerDeps = {
   readonly clock: Clock;
   readonly model: ModelClient;
   readonly tools: ToolRegistry;
+  readonly embedder: EmbeddingClient;
 };
 
 type HookResult = { decision: "approve" } | { decision: "deny"; reason: string };
@@ -309,7 +312,17 @@ async function handleSessionStart(
       if (!agentResult.ok) return err(mapAgentError(agentResult.error));
 
       const { chainId, depth } = mintChainAndDepth();
-      const context = synthesizeOpeningContext(payload, agentResult.value);
+      const synthSignal = AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS);
+      const context = await synthesizeOpeningContext(
+        { sql: deps.sql, clock: deps.clock, embedder: deps.embedder },
+        payload,
+        agentResult.value,
+        synthSignal,
+      );
+      const context0 = context[0];
+      assert(context0 !== undefined, "handleSessionStart: context[0] must exist");
+      assert(context0.role === "system", "handleSessionStart: context[0] must be system entry");
+      const enrichedSystemPrompt = context0.content;
 
       const sessionResult = await createSession(deps.sql, deps.clock, {
         agentId: payload.targetAgentId,
@@ -333,7 +346,7 @@ async function handleSessionStart(
         item,
         session,
         payload.targetAgentId,
-        agentResult.value.systemPrompt,
+        enrichedSystemPrompt,
         context,
       );
       if (!loopResult.ok) return loopResult;
@@ -399,7 +412,13 @@ async function handleTaskFire(
       if (!agentResult.ok) return err(mapAgentError(agentResult.error));
 
       const { chainId, depth } = mintChainAndDepth();
-      const context = synthesizeOpeningContext(payload, agentResult.value);
+      const synthSignal = AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS);
+      const context = await synthesizeOpeningContext(
+        { sql: deps.sql, clock: deps.clock, embedder: deps.embedder },
+        payload,
+        agentResult.value,
+        synthSignal,
+      );
 
       const sessionResult = await createSession(deps.sql, deps.clock, {
         agentId: payload.agentId,

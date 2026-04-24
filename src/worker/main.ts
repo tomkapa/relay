@@ -10,6 +10,7 @@ import { assert } from "../core/assert.ts";
 import { realClock } from "../core/clock.ts";
 import { connect } from "../db/client.ts";
 import { triggerHandlers } from "../trigger/handlers.ts";
+import { OpenAIEmbeddingClient } from "../memory/embedding-openai.ts";
 import { AnthropicModelClient } from "../session/model-anthropic.ts";
 import { InMemoryToolRegistry, echoTool } from "../session/tools-inmemory.ts";
 import { MAX_WORKER_ID_LEN } from "../work_queue/limits.ts";
@@ -34,7 +35,14 @@ assert(
   "worker: ANTHROPIC_API_KEY must be set",
 );
 
+const OPENAI_API_KEY = process.env["OPENAI_API_KEY"];
+assert(
+  OPENAI_API_KEY !== undefined && OPENAI_API_KEY.length > 0,
+  "worker: OPENAI_API_KEY must be set",
+);
+
 const model = new AnthropicModelClient({ apiKey: ANTHROPIC_API_KEY });
+const embedder = new OpenAIEmbeddingClient({ apiKey: OPENAI_API_KEY });
 const tools = new InMemoryToolRegistry([echoTool]);
 
 const sql = connect({ url: DATABASE_URL, applicationName: "relay-worker" });
@@ -59,7 +67,7 @@ await runWorker(
     queue,
     workerId,
     clock: realClock,
-    dispatcher: triggerHandlers({ sql, clock: realClock, model, tools }),
+    dispatcher: triggerHandlers({ sql, clock: realClock, model, embedder, tools }),
   },
   ctrl.signal,
 );
