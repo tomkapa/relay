@@ -14,9 +14,11 @@ import {
 } from "../../../src/ids.ts";
 import type { AgentId, SessionId, TenantId } from "../../../src/ids.ts";
 import type { ModelClient } from "../../../src/session/model.ts";
+import { makeRememberTool } from "../../../src/memory/remember.ts";
 import { InMemoryToolRegistry, echoTool } from "../../../src/session/tools-inmemory.ts";
 import { runTurnLoop } from "../../../src/session/turn-loop.ts";
 import type { Message, ModelResponse, ToolUseBlock } from "../../../src/session/turn.ts";
+import { FakeEmbeddingClient } from "../../fakes/embedding-fake.ts";
 import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
 
 let sqlRef: Sql | undefined;
@@ -238,6 +240,61 @@ describeOrSkip("runTurnLoop (integration)", () => {
       // The unique constraint should cause an insert error surfaced as persist_turn_failed
       expect(result2.ok).toBe(false);
       if (!result2.ok) expect(result2.error.kind).toBe("persist_turn_failed");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "remember_tool_dispatched_by_loop_writes_memory_row",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_000_000);
+      const { agentId, tenantId } = makeIds();
+      await sql`INSERT INTO agents (id, tenant_id, system_prompt) VALUES (${agentId}, ${tenantId}, 'sys')`;
+      const sessionId = await insertSession(sql, agentId, tenantId);
+
+      const toolUseId = "tc_remember_1";
+      let callCount = 0;
+      const model: ModelClient = {
+        complete: () => {
+          callCount++;
+          if (callCount === 1) {
+            const toolBlock: ToolUseBlock = {
+              type: "tool_use",
+              id: toolUseId,
+              name: "remember",
+              input: { text: "the user likes cats" },
+            };
+            return Promise.resolve({
+              content: [toolBlock],
+              stopReason: "tool_use" as const,
+              usage: { inputTokens: 10, outputTokens: 5 },
+            });
+          }
+          return Promise.resolve(textResponse("done"));
+        },
+      };
+
+      const embedding = new FakeEmbeddingClient();
+      const tools = new InMemoryToolRegistry([makeRememberTool({ sql, embedding })]);
+
+      const result = await runTurnLoop(
+        { sql, clock, model, tools },
+        { sessionId, agentId, tenantId, systemPrompt: "sys", initialMessages: baseMessages },
+      );
+
+      expect(result.ok).toBe(true);
+
+      const rows = await sql<{ kind: string; text: string; agent_id: string; tenant_id: string }[]>`
+        SELECT kind, text, agent_id, tenant_id FROM memory
+      `;
+      expect(rows).toHaveLength(1);
+      const row = rows[0];
+      if (row === undefined) return;
+      expect(row.kind).toBe("event");
+      expect(row.text).toBe("the user likes cats");
+      expect(row.agent_id).toBe(agentId);
+      expect(row.tenant_id).toBe(tenantId);
     },
     HOOK_TIMEOUT_MS,
   );

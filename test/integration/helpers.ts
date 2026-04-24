@@ -4,7 +4,8 @@ import { describe } from "bun:test";
 import type { Sql } from "postgres";
 import { assert } from "../../src/core/assert.ts";
 import { idempotencyKey, type IdempotencyKey } from "../../src/core/idempotency.ts";
-import { SessionId, TurnId } from "../../src/ids.ts";
+import { AgentId, SessionId, TenantId, TurnId } from "../../src/ids.ts";
+import type { AgentId as AgentIdType, TenantId as TenantIdType } from "../../src/ids.ts";
 import { WRITER } from "../../src/memory/insert.ts";
 
 export const DB_URL = process.env["INTEGRATION_DATABASE_URL"];
@@ -25,6 +26,20 @@ export async function resetDb(s: Sql): Promise<void> {
     DROP TABLE IF EXISTS _migrations CASCADE;
     DROP EXTENSION IF EXISTS vector CASCADE;
   `);
+}
+
+export async function insertAgent(sql: Sql, agentId: string, tenantId: string): Promise<void> {
+  await sql`
+    INSERT INTO agents (id, tenant_id, system_prompt, tool_set, hook_rules, created_at, updated_at)
+    VALUES (${agentId}, ${tenantId}, 'test agent', '[]'::jsonb, '[]'::jsonb, now(), now())
+  `;
+}
+
+export function makeIds(): { agentId: AgentIdType; tenantId: TenantIdType } {
+  const a = AgentId.parse(randomUUID());
+  const t = TenantId.parse(randomUUID());
+  assert(a.ok && t.ok, "fixture: randomUUID produced invalid ids");
+  return { agentId: a.value, tenantId: t.value };
 }
 
 export function makeTestKey(): IdempotencyKey {
