@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   AgentId,
+  CandidatePool,
   ChainId,
   Depth,
   DEPTH_CAP,
   HookId,
   Importance,
   MemoryId,
+  RetrievalK,
   SessionId,
   TaskId,
   TenantId,
@@ -14,6 +16,7 @@ import {
   UserId,
   mintId,
 } from "../../../src/ids.ts";
+import { MAX_RETRIEVAL, MAX_RETRIEVAL_CANDIDATES } from "../../../src/memory/limits.ts";
 
 const VALID_V4 = "550e8400-e29b-41d4-a716-446655440000";
 const VALID_V7 = "018f3f2a-4a2b-7b7a-8cba-2b55a6fe8d11";
@@ -123,6 +126,73 @@ describe("Importance.parse", () => {
   test("rejects NaN and Infinity", () => {
     expect(Importance.parse(Number.NaN).ok).toBe(false);
     expect(Importance.parse(Number.POSITIVE_INFINITY).ok).toBe(false);
+  });
+});
+
+describe("RetrievalK.parse", () => {
+  test("RetrievalK_parse_acceptsBoundsInclusive", () => {
+    expect(RetrievalK.parse(1).ok).toBe(true);
+    expect(RetrievalK.parse(MAX_RETRIEVAL).ok).toBe(true);
+  });
+
+  test("RetrievalK_parse_rejectsZero", () => {
+    const r = RetrievalK.parse(0);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("out_of_range");
+  });
+
+  test("RetrievalK_parse_rejectsNegative", () => {
+    expect(RetrievalK.parse(-1).ok).toBe(false);
+  });
+
+  test("RetrievalK_parse_rejectsOverMax", () => {
+    expect(RetrievalK.parse(MAX_RETRIEVAL + 1).ok).toBe(false);
+  });
+
+  test("RetrievalK_parse_rejectsNonInteger", () => {
+    expect(RetrievalK.parse(1.5).ok).toBe(false);
+  });
+});
+
+describe("CandidatePool.parse", () => {
+  test("CandidatePool_parse_acceptsAtLeastK", () => {
+    const kResult = RetrievalK.parse(5);
+    if (!kResult.ok) throw new Error("k parse failed");
+    const k = kResult.value;
+    expect(CandidatePool.parse(5, k).ok).toBe(true);
+    expect(CandidatePool.parse(10, k).ok).toBe(true);
+  });
+
+  test("CandidatePool_parse_rejectsBelowK", () => {
+    const kResult = RetrievalK.parse(10);
+    if (!kResult.ok) throw new Error("k parse failed");
+    const k = kResult.value;
+    const r = CandidatePool.parse(9, k);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("below_k");
+  });
+
+  test("CandidatePool_parse_rejectsOverMax", () => {
+    const kResult = RetrievalK.parse(1);
+    if (!kResult.ok) throw new Error("k parse failed");
+    const k = kResult.value;
+    const r = CandidatePool.parse(MAX_RETRIEVAL_CANDIDATES + 1, k);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("out_of_range");
+  });
+
+  test("CandidatePool_parse_rejectsNonInteger", () => {
+    const kResult = RetrievalK.parse(1);
+    if (!kResult.ok) throw new Error("k parse failed");
+    const k = kResult.value;
+    expect(CandidatePool.parse(5.5, k).ok).toBe(false);
+  });
+
+  test("CandidatePool_parse_rejectsZero", () => {
+    const kResult = RetrievalK.parse(1);
+    if (!kResult.ok) throw new Error("k parse failed");
+    const k = kResult.value;
+    expect(CandidatePool.parse(0, k).ok).toBe(false);
   });
 });
 

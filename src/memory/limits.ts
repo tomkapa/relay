@@ -3,6 +3,17 @@
 // Max entries returned by a single retrieval call. Higher → better recall, worse latency.
 export const MAX_RETRIEVAL = 32;
 
+// Pre-rerank candidate pool. Larger → re-rank has more headroom to demote similarity-leaders
+// that lose on importance/recency. Tuning is RELAY-219's concern.
+// MAX is a hard ceiling so a buggy caller cannot fan-out unboundedly (CLAUDE §5).
+export const DEFAULT_RETRIEVAL_CANDIDATES = 32;
+export const MAX_RETRIEVAL_CANDIDATES = 128;
+
+// pgvector's HNSW dynamic candidate list size. Set per-transaction via SET LOCAL.
+// pgvector default is 40; we use max(candidatePool, 40) so the index always offers
+// at least as many candidates as we want to re-rank.
+export const HNSW_EF_SEARCH_FLOOR = 40;
+
 // Embedding vector dimension. Commits to OpenAI text-embedding-3-small (experimentation phase).
 // Qwen3-Embed-8B (4096-dim) migration is owned by RELAY-214 — do not parametrize.
 export const EMBEDDING_DIM = 1536;

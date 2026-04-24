@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { assert } from "./core/assert.ts";
 import type { Brand } from "./core/brand.ts";
 import { err, ok, type Result } from "./core/result.ts";
+import { MAX_RETRIEVAL, MAX_RETRIEVAL_CANDIDATES } from "./memory/limits.ts";
 
 export type AgentId = Brand<string, "AgentId">;
 export type SessionId = Brand<string, "SessionId">;
@@ -110,5 +111,33 @@ export const Importance = {
       return err({ kind: "out_of_range", value: raw, min: 0, max: 1 });
     }
     return ok(raw as Importance);
+  },
+};
+
+// Branded numeric types for retrieval parameters (SPEC §Memory).
+export type RetrievalK = Brand<number, "RetrievalK">; // 1 ≤ k ≤ MAX_RETRIEVAL
+export type CandidatePool = Brand<number, "CandidatePool">; // k ≤ pool ≤ MAX_RETRIEVAL_CANDIDATES
+
+export type RetrievalKError = { kind: "out_of_range"; value: number; min: 1; max: number };
+export type CandidatePoolError =
+  | { kind: "below_k"; pool: number; k: number }
+  | { kind: "out_of_range"; value: number; min: number; max: number };
+
+export const RetrievalK = {
+  parse: (raw: number): Result<RetrievalK, RetrievalKError> => {
+    if (!Number.isInteger(raw) || raw < 1 || raw > MAX_RETRIEVAL) {
+      return err({ kind: "out_of_range", value: raw, min: 1, max: MAX_RETRIEVAL });
+    }
+    return ok(raw as RetrievalK);
+  },
+};
+
+export const CandidatePool = {
+  parse: (raw: number, k: RetrievalK): Result<CandidatePool, CandidatePoolError> => {
+    if (!Number.isInteger(raw) || raw < 1 || raw > MAX_RETRIEVAL_CANDIDATES) {
+      return err({ kind: "out_of_range", value: raw, min: 1, max: MAX_RETRIEVAL_CANDIDATES });
+    }
+    if (raw < k) return err({ kind: "below_k", pool: raw, k });
+    return ok(raw as CandidatePool);
   },
 };
