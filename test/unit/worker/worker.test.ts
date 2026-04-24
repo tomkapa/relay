@@ -43,6 +43,7 @@ function makeItem(kind: WorkKind): WorkItem {
     payloadRef: "test:ref",
     scheduledAt: new Date(0),
     attempts: 1,
+    traceparent: null,
   };
 }
 
@@ -913,5 +914,60 @@ describe("saturation counters — worker tick", () => {
     expect(sumCounter(rm, "relay.worker.tick_completion_total", { "relay.outcome": "error" })).toBe(
       1,
     );
+  });
+});
+
+describe("cross-process trace context restoration", () => {
+  // Run the worker against one item and return whatever traceparent the handler observed
+  // inside its dispatched context. Abort after a single dispatch so the loop exits.
+  async function observeDispatchedTraceparent(item: WorkItem): Promise<string | null> {
+    const queue = makeWorkerQueueFake([ok([item])]);
+    const observed: { value: string | null } = { value: null };
+    const { captureTraceparent } = await import("../../../src/telemetry/otel.ts");
+    const noop = (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined));
+    const dispatcher: Dispatcher = {
+      session_start: (): Promise<Result<void, HandlerError>> => {
+        observed.value = captureTraceparent();
+        ctrl.abort();
+        return Promise.resolve(ok(undefined));
+      },
+      task_fire: noop,
+      inbound_message: noop,
+    };
+
+    const workerPromise = runWorker(
+      { queue, workerId: makeWorkerId(), clock, dispatcher, emptyIdleMs: 50 },
+      ctrl.signal,
+    );
+    await flush(30);
+    clock.advance(50);
+    await flush(30);
+    await workerPromise;
+    return observed.value;
+  }
+
+  test("item.traceparent becomes the active context during handler dispatch", async () => {
+    const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    const captured = await observeDispatchedTraceparent({
+      ...makeItem("session_start"),
+      traceparent: tp,
+    });
+
+    // Handler's span_id will differ (it's the worker.handle span, a child of the remote
+    // parent), so assert only on trace_id and flags.
+    expect(captured).not.toBeNull();
+    if (captured === null) return;
+    const parts = captured.split("-");
+    expect(parts[0]).toBe("00");
+    expect(parts[1]).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
+    expect(parts[3]).toBe("01");
+  });
+
+  test("null traceparent leaves the dispatcher without an inherited context", async () => {
+    const captured = await observeDispatchedTraceparent({
+      ...makeItem("session_start"),
+      traceparent: null,
+    });
+    expect(captured).toBeNull();
   });
 });

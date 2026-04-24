@@ -32,3 +32,8 @@ export const MAX_WORK_QUEUE_ROWS_PER_TENANT = 10_000;
 // time-series store from a tenant-creation bug explosion. Not an operational limit
 // on tenants per cluster — that is a product decision elsewhere.
 export const MAX_TENANTS_OBSERVED_PER_TICK = 1_000;
+
+// W3C traceparent header. Spec format is exactly 55 chars ("00-<32>-<16>-<2>"); 64 gives
+// headroom for future version bumps while still catching garbage before it hits the DB.
+// CLAUDE.md §5 — cap every string crossing a trust boundary.
+export const MAX_TRACEPARENT_LEN = 64;

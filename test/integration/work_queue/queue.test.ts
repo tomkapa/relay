@@ -88,6 +88,37 @@ describeOrSkip("work_queue (integration)", () => {
       expect(item.kind).toBe("session_start");
       expect(item.payloadRef).toBe("session:abc");
       expect(item.attempts).toBe(1);
+      expect(item.traceparent).toBeNull();
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "enqueue persists an explicit traceparent and dequeue returns it verbatim",
+    async () => {
+      const sql = requireSql();
+      const t = tenant();
+      const w = worker("worker-tp");
+      const now = new Date();
+      const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+      const eq = await enqueue(sql, {
+        tenantId: t,
+        kind: "session_start",
+        payloadRef: "session:tp",
+        scheduledAt: now,
+        traceparent: tp,
+      });
+      expect(eq.ok).toBe(true);
+      if (!eq.ok) return;
+
+      const dq = await dequeue(sql, { workerId: w, limit: 1, now });
+      expect(dq.ok).toBe(true);
+      if (!dq.ok) return;
+      const item = dq.value[0];
+      expect(item).toBeDefined();
+      if (!item) return;
+      expect(item.traceparent).toBe(tp);
     },
     HOOK_TIMEOUT_MS,
   );

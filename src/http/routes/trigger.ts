@@ -11,7 +11,7 @@ import { assertNever } from "../../core/assert.ts";
 import { err, ok, type Result } from "../../core/result.ts";
 import { AgentId, TenantId } from "../../ids.ts";
 import type { AgentId as AgentIdBrand, TenantId as TenantIdBrand } from "../../ids.ts";
-import { Attr, SpanName, counter, emit, histogram, tracer } from "../../telemetry/otel.ts";
+import { Attr, SpanName, counter, emit, tracer } from "../../telemetry/otel.ts";
 import { writeEnvelope } from "../../trigger/envelope-ops.ts";
 import {
   MAX_MESSAGE_CONTENT_BYTES,
@@ -153,7 +153,7 @@ export function triggerRoute(deps: TriggerDeps): Hono {
 
           const registerResult = deps.registry.register(envelopeId);
           if (!registerResult.ok) {
-            counter("http.trigger.sync_capacity_exhausted_total").add(1);
+            counter("relay.http.trigger.sync_capacity_exhausted_total").add(1);
             emit("INFO", "http.trigger.capacity_exhausted", { cap: registerResult.error.cap });
             span.setStatus({ code: SpanStatusCode.ERROR, message: registerResult.error.kind });
             return c.json({ error: registerResult.error }, 503);
@@ -179,7 +179,7 @@ export function triggerRoute(deps: TriggerDeps): Hono {
             );
           }
 
-          counter("http.trigger.received_total").add(1, { [Attr.TenantId]: tenantId });
+          counter("relay.http.trigger.received_total").add(1, { [Attr.TenantId]: tenantId });
           emit("INFO", "http.trigger.enqueued", {
             [Attr.EnvelopeId]: envelopeId,
             [Attr.TenantId]: tenantId,
@@ -204,10 +204,10 @@ export function triggerRoute(deps: TriggerDeps): Hono {
           deps.registry.drop(envelopeId); // idempotent — no-op if NOTIFY already resolved it
 
           const elapsedMs = deps.clock.monotonic() - startWaitMs;
-          histogram("http.trigger.sync_wait_ms").record(elapsedMs, { [Attr.TenantId]: tenantId });
+          span.setAttribute(Attr.SyncWaitMs, elapsedMs);
 
           if (outcome.kind === "timeout") {
-            counter("http.trigger.timeout_total").add(1, { [Attr.TenantId]: tenantId });
+            counter("relay.http.trigger.timeout_total").add(1, { [Attr.TenantId]: tenantId });
             emit("INFO", "http.trigger.timeout", {
               [Attr.TenantId]: tenantId,
               waited_ms: timeoutMs,

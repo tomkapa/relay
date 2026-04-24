@@ -15,7 +15,7 @@ import type {
   SessionId as SessionIdBrand,
   TenantId as TenantIdBrand,
 } from "../ids.ts";
-import { Attr, SpanName, counter, emit, histogram, withSpan } from "../telemetry/otel.ts";
+import { Attr, SpanName, counter, emit, withSpan } from "../telemetry/otel.ts";
 import type { Dispatcher, HandlerError } from "../worker/dispatcher.ts";
 import type { WorkItem } from "../work_queue/queue.ts";
 import { loadAgent } from "../agent/load.ts";
@@ -216,7 +216,7 @@ async function runLoopAndClose(
   );
   const termination = classifyLoopResult(loopResult);
   if (termination.kind === "retry") {
-    counter("session.turn_loop_outcome_total").add(1, {
+    counter("relay.session.turn_loop_outcome_total").add(1, {
       [Attr.TenantId]: item.tenantId,
       [Attr.TriggerKind]: item.kind,
       [Attr.TurnLoopOutcome]: "retryable_error",
@@ -230,7 +230,7 @@ async function runLoopAndClose(
     reason: termination.reason,
   });
   if (!closeResult.ok) return err(mapCloseError(closeResult.error));
-  counter("session.turn_loop_outcome_total").add(1, {
+  counter("relay.session.turn_loop_outcome_total").add(1, {
     [Attr.TenantId]: item.tenantId,
     [Attr.TriggerKind]: item.kind,
     [Attr.TurnLoopOutcome]: termination.reason.kind,
@@ -246,11 +246,10 @@ async function runLoopAndClose(
 }
 
 async function finalizeSession(
-  deps: HandlerDeps,
+  _deps: HandlerDeps,
   item: WorkItem,
   sessionResult: { id: SessionIdBrand; isDuplicate: boolean },
   payload: TriggerPayload,
-  start: number,
 ): Promise<Result<void, HandlerError>> {
   const hook = await hookStub(sessionResult.id, payload);
   if (hook.decision === "deny") {
@@ -258,17 +257,14 @@ async function finalizeSession(
   }
 
   if (sessionResult.isDuplicate) {
-    counter("trigger.duplicate_session_avoided_total").add(1, { [Attr.TriggerKind]: item.kind });
-  } else {
-    counter("trigger.session_created_total").add(1, { [Attr.TriggerKind]: item.kind });
+    counter("relay.trigger.duplicate_session_avoided_total").add(1, {
+      [Attr.TriggerKind]: item.kind,
+    });
   }
   emit("INFO", `trigger.${item.kind}.ready`, {
     [Attr.TenantId]: item.tenantId,
     [Attr.SessionId]: sessionResult.id,
     [Attr.WorkId]: item.id,
-  });
-  histogram("trigger.handler_duration_ms").record(deps.clock.monotonic() - start, {
-    [Attr.TriggerKind]: item.kind,
   });
 
   return ok(undefined);
@@ -283,8 +279,6 @@ async function handleSessionStart(
     SpanName.TriggerIngest,
     { [Attr.TriggerKind]: item.kind, [Attr.TenantId]: item.tenantId },
     async () => {
-      const start = deps.clock.monotonic();
-
       const envelopeIdResult = EnvelopeId.parse(item.payloadRef);
       if (!envelopeIdResult.ok) {
         return err<HandlerError>({
@@ -338,7 +332,7 @@ async function handleSessionStart(
 
       const session = sessionResult.value;
       if (session.isDuplicate) {
-        return finalizeSession(deps, item, session, payload, start);
+        return finalizeSession(deps, item, session, payload);
       }
 
       const loopResult = await runLoopAndClose(
@@ -351,7 +345,7 @@ async function handleSessionStart(
       );
       if (!loopResult.ok) return loopResult;
 
-      return finalizeSession(deps, item, session, payload, start);
+      return finalizeSession(deps, item, session, payload);
     },
   );
 }
@@ -398,8 +392,6 @@ async function handleTaskFire(
     SpanName.TriggerIngest,
     { [Attr.TriggerKind]: item.kind, [Attr.TenantId]: item.tenantId },
     async () => {
-      const start = deps.clock.monotonic();
-
       const taskRowResult = await readTaskRow(deps.sql, item.payloadRef, item.tenantId);
       if (!taskRowResult.ok) return taskRowResult;
       const taskRow = taskRowResult.value;
@@ -438,7 +430,7 @@ async function handleTaskFire(
       });
       if (!sessionResult.ok) return err(mapSessionError(sessionResult.error));
 
-      return finalizeSession(deps, item, sessionResult.value, payload, start);
+      return finalizeSession(deps, item, sessionResult.value, payload);
     },
   );
 }
@@ -514,8 +506,6 @@ async function handleInboundMessage(
     SpanName.TriggerIngest,
     { [Attr.TriggerKind]: item.kind, [Attr.TenantId]: item.tenantId },
     async () => {
-      const start = deps.clock.monotonic();
-
       const inboundIdResult = InboundMessageId.parse(item.payloadRef);
       if (!inboundIdResult.ok) {
         return err<HandlerError>({
@@ -555,7 +545,7 @@ async function handleInboundMessage(
         return err<HandlerError>({ kind: "handler_failed", reason: `hook denied: ${hook.reason}` });
       }
 
-      counter("trigger.inbound_message_delivered_total").add(1, {
+      counter("relay.trigger.inbound_message_delivered_total").add(1, {
         [Attr.TriggerKind]: item.kind,
         [Attr.SenderType]: payload.sender.type,
       });
@@ -564,9 +554,6 @@ async function handleInboundMessage(
         [Attr.SessionId]: payload.targetSessionId,
         [Attr.InboundMessageId]: inboundIdResult.value,
         [Attr.WorkId]: item.id,
-      });
-      histogram("trigger.handler_duration_ms").record(deps.clock.monotonic() - start, {
-        [Attr.TriggerKind]: item.kind,
       });
 
       return ok(undefined);

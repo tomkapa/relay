@@ -6,7 +6,12 @@ import { assert } from "../core/assert.ts";
 import type { Brand } from "../core/brand.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import type { TenantId, WorkItemId } from "../ids.ts";
-import { MAX_DEQUEUE_BATCH, MAX_PAYLOAD_REF_LEN, MAX_WORKER_ID_LEN } from "./limits.ts";
+import {
+  MAX_DEQUEUE_BATCH,
+  MAX_PAYLOAD_REF_LEN,
+  MAX_TRACEPARENT_LEN,
+  MAX_WORKER_ID_LEN,
+} from "./limits.ts";
 
 // WorkerId is queue-scoped: workers pick arbitrary identifiers (hostname+pid, pod name)
 // that are not UUIDs, so they don't live in `ids.ts` with the entity ids.
@@ -23,7 +28,8 @@ export type WorkQueueError =
   | { kind: "batch_out_of_range"; requested: number; min: number; max: number }
   | { kind: "lease_ms_non_positive"; leaseMs: number }
   | { kind: "lease_not_held"; id: WorkItemId }
-  | { kind: "queue_over_capacity"; tenantId: TenantId; cap: number };
+  | { kind: "queue_over_capacity"; tenantId: TenantId; cap: number }
+  | { kind: "traceparent_too_long"; length: number; max: number };
 
 export type WorkItem = {
   readonly id: WorkItemId;
@@ -32,6 +38,9 @@ export type WorkItem = {
   readonly payloadRef: string;
   readonly scheduledAt: Date;
   readonly attempts: number;
+  // W3C traceparent captured at enqueue time. Null when no active trace context existed
+  // (e.g. scheduler-originated enqueue with no parent) or when boundary parsing rejected it.
+  readonly traceparent: string | null;
 };
 
 export type EnqueueParams = {
@@ -39,6 +48,9 @@ export type EnqueueParams = {
   readonly kind: WorkKind;
   readonly payloadRef: string;
   readonly scheduledAt: Date;
+  // Optional explicit traceparent. Omit to let queue-ops capture the caller's active
+  // context automatically — tests pass this explicitly for deterministic assertions.
+  readonly traceparent?: string | null;
 };
 
 export type DequeueParams = {
@@ -57,6 +69,7 @@ export type WorkRow = {
   readonly payload_ref: string;
   readonly scheduled_at: Date;
   readonly attempts: number;
+  readonly traceparent: string | null;
 };
 
 export const WorkerId = {
@@ -77,6 +90,15 @@ export function validateEnqueue(params: EnqueueParams): Result<void, WorkQueueEr
       length: params.payloadRef.length,
       max: MAX_PAYLOAD_REF_LEN,
     });
+  }
+  if (params.traceparent !== undefined && params.traceparent !== null) {
+    if (params.traceparent.length > MAX_TRACEPARENT_LEN) {
+      return err({
+        kind: "traceparent_too_long",
+        length: params.traceparent.length,
+        max: MAX_TRACEPARENT_LEN,
+      });
+    }
   }
   return ok(undefined);
 }
@@ -109,5 +131,6 @@ export function rowToItem(r: WorkRow): WorkItem {
     payloadRef: r.payload_ref,
     scheduledAt: r.scheduled_at,
     attempts: r.attempts,
+    traceparent: r.traceparent,
   };
 }

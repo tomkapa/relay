@@ -6,7 +6,7 @@ import type { Sql } from "postgres";
 import { assert } from "../core/assert.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { WorkItemId, mintId } from "../ids.ts";
-import { Attr, SpanName, counter, withSpan } from "../telemetry/otel.ts";
+import { Attr, captureTraceparent, counter } from "../telemetry/otel.ts";
 import { DEFAULT_LEASE_MS, MAX_WORK_QUEUE_ROWS_PER_TENANT } from "./limits.ts";
 import {
   rowToItem,
@@ -24,7 +24,9 @@ export async function enqueue(
   sql: Sql,
   params: EnqueueParams,
 ): Promise<Result<WorkItemId, WorkQueueError>> {
-  const v = validateEnqueue(params);
+  // `undefined` means auto-capture; explicit `null` means "enqueued without a parent".
+  const traceparent = params.traceparent === undefined ? captureTraceparent() : params.traceparent;
+  const v = validateEnqueue({ ...params, traceparent });
   if (!v.ok) return v;
 
   const id = mintId(WorkItemId.parse, "enqueue");
@@ -36,10 +38,11 @@ export async function enqueue(
              ${params.tenantId}::uuid AS tenant_id,
              ${params.kind}::text  AS kind,
              ${params.payloadRef}::text AS payload_ref,
-             ${params.scheduledAt}::timestamptz AS scheduled_at
+             ${params.scheduledAt}::timestamptz AS scheduled_at,
+             ${traceparent}::text AS traceparent
     )
-    INSERT INTO work_queue (id, tenant_id, kind, payload_ref, scheduled_at)
-    SELECT c.id, c.tenant_id, c.kind, c.payload_ref, c.scheduled_at
+    INSERT INTO work_queue (id, tenant_id, kind, payload_ref, scheduled_at, traceparent)
+    SELECT c.id, c.tenant_id, c.kind, c.payload_ref, c.scheduled_at, c.traceparent
     FROM candidate c
     WHERE (
       SELECT count(*) FROM work_queue
@@ -74,44 +77,32 @@ export async function dequeue(
   assert(leaseMs > 0, "dequeue: lease_ms positive post-validation", { leaseMs });
   const leaseUntil = new Date(params.now.getTime() + leaseMs);
 
-  return withSpan(
-    SpanName.WorkerPick,
-    {
-      [Attr.QueueOp]: "dequeue",
-      [Attr.QueueBatch]: params.limit,
-    },
-    async (span) => {
-      const rows = await sql<WorkRow[]>`
-        UPDATE work_queue SET
-          leased_by = ${params.workerId},
-          leased_until = ${leaseUntil},
-          attempts = attempts + 1,
-          updated_at = now()
-        WHERE id IN (
-          SELECT id FROM work_queue
-          WHERE completed_at IS NULL
-            AND scheduled_at <= ${params.now}
-            AND (leased_until IS NULL OR leased_until < ${params.now})
-          ORDER BY scheduled_at, id
-          FOR UPDATE SKIP LOCKED
-          LIMIT ${params.limit}
-        )
-        RETURNING id, tenant_id, kind, payload_ref, scheduled_at, attempts
-      `;
+  const rows = await sql<WorkRow[]>`
+    UPDATE work_queue SET
+      leased_by = ${params.workerId},
+      leased_until = ${leaseUntil},
+      attempts = attempts + 1,
+      updated_at = now()
+    WHERE id IN (
+      SELECT id FROM work_queue
+      WHERE completed_at IS NULL
+        AND scheduled_at <= ${params.now}
+        AND (leased_until IS NULL OR leased_until < ${params.now})
+      ORDER BY scheduled_at, id
+      FOR UPDATE SKIP LOCKED
+      LIMIT ${params.limit}
+    )
+    RETURNING id, tenant_id, kind, payload_ref, scheduled_at, attempts, traceparent
+  `;
 
-      // UPDATE ... RETURNING does not preserve the inner ORDER BY — Postgres returns
-      // updated rows in arbitrary physical order. The subquery picks the correct N rows
-      // (earliest ready); we restore scheduled_at ordering here so callers see the
-      // batch in the order a worker should process it.
-      const items = rows
-        .map(rowToItem)
-        .sort(
-          (a, b) => a.scheduledAt.getTime() - b.scheduledAt.getTime() || a.id.localeCompare(b.id),
-        );
-      span.setAttribute(Attr.QueuePicked, items.length);
-      return ok(items);
-    },
-  );
+  // UPDATE ... RETURNING does not preserve the inner ORDER BY — Postgres returns
+  // updated rows in arbitrary physical order. The subquery picks the correct N rows
+  // (earliest ready); we restore scheduled_at ordering here so callers see the
+  // batch in the order a worker should process it.
+  const items = rows
+    .map(rowToItem)
+    .sort((a, b) => a.scheduledAt.getTime() - b.scheduledAt.getTime() || a.id.localeCompare(b.id));
+  return ok(items);
 }
 
 // Succeeds only if the caller still holds the lease; otherwise returns lease_not_held

@@ -13,3 +13,9 @@ export const TRACE_EXPORT_INTERVAL_MS = 5_000;
 // Log BatchLogRecordProcessor interval. Matches TRACE_EXPORT_INTERVAL_MS so trace↔log
 // correlation in the debugging workflow is tight.
 export const LOG_EXPORT_INTERVAL_MS = 5_000;
+
+// PeriodicExportingMetricReader interval. 10s matches the OTel SDK default and gives
+// Honeycomb enough time-resolution for rate/gauge queries without flooding the OTLP path
+// the way a 1s interval would. Delta temporality on counters means each export is a
+// self-contained window.
+export const METRIC_EXPORT_INTERVAL_MS = 10_000;
