@@ -7,7 +7,16 @@ import type { CreateEmbeddingResponse } from "openai/resources/embeddings.js";
 import { AssertionError, assert } from "../core/assert.ts";
 import { err, ok } from "../core/result.ts";
 import type { Result } from "../core/result.ts";
-import { Attr, SpanName, withSpan } from "../telemetry/otel.ts";
+import { recordGenAiOperationDuration, recordGenAiTokenUsage } from "../telemetry/genai-metrics.ts";
+import {
+  Attr,
+  GenAiAttr,
+  GenAiEvent,
+  SpanName,
+  withSpan,
+  type Attributes,
+} from "../telemetry/otel.ts";
+import { MAX_GENAI_CONTENT_BYTES_PER_PART, truncateUtf8 } from "../telemetry/limits.ts";
 import { EMBEDDING_CALL_TIMEOUT_MS, EMBEDDING_DIM, MAX_EMBED_INPUT_BYTES } from "./limits.ts";
 import type { EmbedError, EmbeddingClient } from "./embedding.ts";
 
@@ -32,14 +41,22 @@ export class OpenAIEmbeddingClient implements EmbeddingClient {
     }
     assert(bytes > 0, "OpenAIEmbeddingClient.embed: input text is empty");
 
+    const metricAttrs: Attributes = {
+      [GenAiAttr.OperationName]: "embeddings",
+      [GenAiAttr.ProviderName]: "openai",
+      [GenAiAttr.RequestModel]: this.model,
+    };
+
     return withSpan(
       SpanName.EmbeddingCall,
       {
         [Attr.EmbeddingModel]: this.model,
         [Attr.EmbeddingDim]: EMBEDDING_DIM,
         [Attr.EmbeddingInputBytes]: bytes,
+        ...metricAttrs,
+        [GenAiAttr.EmbeddingsDimensionCount]: EMBEDDING_DIM,
       },
-      async () => {
+      async (span) => {
         const localCtl = new AbortController();
         const timer = setTimeout(() => {
           localCtl.abort();
@@ -55,11 +72,16 @@ export class OpenAIEmbeddingClient implements EmbeddingClient {
         } catch (e: unknown) {
           clearTimeout(timer);
           const elapsedMs = Math.round(performance.now() - started);
+          recordGenAiOperationDuration(elapsedMs / 1000, {
+            ...metricAttrs,
+            [GenAiAttr.ErrorType]: e instanceof Error ? e.name : "unknown",
+          });
           if (composite.aborted) return err({ kind: "timeout", elapsedMs });
           if (e instanceof AssertionError) throw e;
           return err(classify(e, elapsedMs));
         }
         clearTimeout(timer);
+        const elapsedMs = Math.round(performance.now() - started);
         assert(rawResp.data.length === 1, "OpenAIEmbeddingClient: expected exactly 1 embedding");
         const item = rawResp.data[0];
         assert(item !== undefined, "OpenAIEmbeddingClient: embedding item is undefined");
@@ -68,6 +90,17 @@ export class OpenAIEmbeddingClient implements EmbeddingClient {
           "OpenAIEmbeddingClient: provider returned wrong dimension",
           { got: item.embedding.length, expected: EMBEDDING_DIM },
         );
+        const inputTokens = rawResp.usage.prompt_tokens;
+        span.setAttribute(GenAiAttr.UsageInputTokens, inputTokens);
+        const t = truncateUtf8(text, MAX_GENAI_CONTENT_BYTES_PER_PART);
+        span.addEvent(GenAiEvent.InferenceDetails, {
+          [GenAiAttr.InputMessages]: JSON.stringify([
+            { role: "user", parts: [{ type: "text", content: t.text }] },
+          ]),
+        });
+        if (t.truncated) span.setAttribute(GenAiAttr.ContentTruncated, true);
+        recordGenAiOperationDuration(elapsedMs / 1000, metricAttrs);
+        recordGenAiTokenUsage(inputTokens, "input", metricAttrs);
         return ok(new Float32Array(item.embedding));
       },
     );
