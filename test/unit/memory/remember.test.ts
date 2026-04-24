@@ -22,6 +22,7 @@ import {
 import type { ToolInvocationContext } from "../../../src/session/tools.ts";
 import { Attr } from "../../../src/telemetry/otel.ts";
 import { FakeEmbeddingClient } from "../../fakes/embedding-fake.ts";
+import type { ResourceMetrics } from "@opentelemetry/sdk-metrics";
 import { installMetricFixture, sumCounter, uninstallMetricFixture } from "../../helpers/metrics.ts";
 
 // ---------------------------------------------------------------------------
@@ -534,8 +535,10 @@ describe("makeRememberTool_schemaShape", () => {
 // ---------------------------------------------------------------------------
 
 describe("makeRememberTool_outcomeCounter", () => {
+  let collect: () => Promise<ResourceMetrics>;
+
   beforeEach(() => {
-    installMetricFixture();
+    ({ collect } = installMetricFixture());
   });
 
   afterEach(async () => {
@@ -547,7 +550,6 @@ describe("makeRememberTool_outcomeCounter", () => {
     const fakeSql = makeHappyPathSql(ctx);
     const tool = makeRememberTool({ sql: asSql(fakeSql), embedding: new FakeEmbeddingClient() });
 
-    const { collect } = installMetricFixture();
     await tool.invoke({ text: "hello" }, ctx, AbortSignal.timeout(5000));
 
     const rm = await collect();
@@ -564,7 +566,6 @@ describe("makeRememberTool_outcomeCounter", () => {
       embedding: new FakeEmbeddingClient({ error: { kind: "transient", message: "x" } }),
     });
 
-    const { collect } = installMetricFixture();
     await tool.invoke({ text: "hello" }, ctx, AbortSignal.timeout(5000));
 
     const rm = await collect();
@@ -581,7 +582,6 @@ describe("makeRememberTool_outcomeCounter", () => {
       embedding: new FakeEmbeddingClient(),
     });
 
-    const { collect } = installMetricFixture();
     await tool.invoke({ text: "" }, ctx, AbortSignal.timeout(5000));
 
     const rm = await collect();
