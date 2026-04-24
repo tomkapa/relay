@@ -43,8 +43,8 @@ export type InboundMessageRow = {
 };
 
 const InboundRowSchema = z.object({
-  id: z.string().uuid(),
-  tenant_id: z.string().uuid(),
+  id: z.uuid(),
+  tenant_id: z.uuid(),
   target_session_id: z.string().min(1),
   sender_type: z.enum(["human", "agent", "system"]),
   sender_id: z.string().min(1),

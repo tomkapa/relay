@@ -37,21 +37,21 @@ export type AgentParseError =
 
 const ToolDescriptorSchema = z
   .object({ name: z.string().min(1).max(MAX_TOOL_NAME_LEN) })
-  .passthrough()
+  .loose()
   .refine((v) => JSON.stringify(v).length <= MAX_TOOL_DESCRIPTOR_BYTES, {
     message: "tool descriptor exceeds byte cap",
   });
 
 const HookRuleLiteralSchema = z
   .object({ name: z.string().min(1).max(MAX_HOOK_RULE_NAME_LEN) })
-  .passthrough()
+  .loose()
   .refine((v) => JSON.stringify(v).length <= MAX_HOOK_RULE_BYTES, {
     message: "hook rule exceeds byte cap",
   });
 
 const AgentCreateBodySchema = z
   .object({
-    tenantId: z.string().uuid(),
+    tenantId: z.uuid(),
     systemPrompt: z.string().min(1).max(MAX_SYSTEM_PROMPT_LEN),
     toolSet: z.array(ToolDescriptorSchema).max(MAX_TOOL_SET_SIZE).default([]),
     hookRules: z.array(HookRuleLiteralSchema).max(MAX_HOOK_RULES_PER_AGENT).default([]),

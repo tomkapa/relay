@@ -70,17 +70,17 @@ const SenderSchema = z.object({
 const MessagePayloadSchema = z.object({
   kind: z.literal("message"),
   sender: SenderSchema,
-  targetAgentId: z.string().uuid(),
+  targetAgentId: z.uuid(),
   content: z.string().min(1),
-  receivedAt: z.string().datetime(),
+  receivedAt: z.iso.datetime(),
 });
 
 const EventPayloadSchema = z.object({
   kind: z.literal("event"),
   source: z.string().min(1).max(MAX_EVENT_SOURCE_LEN),
-  targetAgentId: z.string().uuid(),
+  targetAgentId: z.uuid(),
   data: z.unknown(),
-  receivedAt: z.string().datetime(),
+  receivedAt: z.iso.datetime(),
 });
 
 const EnvelopePayloadSchema = z.discriminatedUnion("kind", [

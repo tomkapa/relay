@@ -22,7 +22,13 @@ export type Message =
   | { readonly role: "user"; readonly content: readonly ContentBlock[] }
   | { readonly role: "assistant"; readonly content: readonly ContentBlock[] };
 
-export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence";
+export type StopReason =
+  | "end_turn"
+  | "tool_use"
+  | "max_tokens"
+  | "stop_sequence"
+  | "pause_turn"
+  | "refusal";
 
 export type ModelUsage = {
   readonly inputTokens: number;
