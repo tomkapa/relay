@@ -80,24 +80,44 @@ const taskPayload: TriggerPayload = {
 
 describe("synthesizeOpeningContext — system entry", () => {
   test("entry[0] is always the system prompt for message kind", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, makeDefaultSignal());
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      messagePayload,
+      agent,
+      makeDefaultSignal(),
+    );
     expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 
   test("entry[0] is always the system prompt for event kind", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, makeDefaultSignal());
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      eventPayload,
+      agent,
+      makeDefaultSignal(),
+    );
     expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 
   test("entry[0] is always the system prompt for task_fire kind", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, makeDefaultSignal());
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      taskPayload,
+      agent,
+      makeDefaultSignal(),
+    );
     expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 });
 
 describe("synthesizeOpeningContext — message payload", () => {
   test("entry[1] has role user with sender metadata", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, makeDefaultSignal());
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      messagePayload,
+      agent,
+      makeDefaultSignal(),
+    );
     const user = ctx[1];
     expect(user?.role).toBe("user");
     if (user?.role !== "user") return;
@@ -105,7 +125,12 @@ describe("synthesizeOpeningContext — message payload", () => {
   });
 
   test("entry[1] has receivedAt as ISO string", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, makeDefaultSignal());
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      messagePayload,
+      agent,
+      makeDefaultSignal(),
+    );
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(user.receivedAt).toBe("2026-04-22T00:00:00.000Z");
@@ -133,22 +158,42 @@ describe("synthesizeOpeningContext — message payload", () => {
 
 describe("synthesizeOpeningContext — event payload", () => {
   test("entry[1] content contains event source string", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, makeDefaultSignal());
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      eventPayload,
+      agent,
+      makeDefaultSignal(),
+    );
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(user.content).toContain("github");
   });
 
   test("renderEvent output is deterministic for fixed payload", async () => {
-    const ctx1 = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, makeDefaultSignal());
-    const ctx2 = await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, makeDefaultSignal());
+    const ctx1 = await synthesizeOpeningContext(
+      defaultDeps(),
+      eventPayload,
+      agent,
+      makeDefaultSignal(),
+    );
+    const ctx2 = await synthesizeOpeningContext(
+      defaultDeps(),
+      eventPayload,
+      agent,
+      makeDefaultSignal(),
+    );
     expect(ctx1[1]).toEqual(ctx2[1]);
   });
 });
 
 describe("synthesizeOpeningContext — task_fire payload", () => {
   test("entry[1] content contains firedAt ISO and intent", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, makeDefaultSignal());
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      taskPayload,
+      agent,
+      makeDefaultSignal(),
+    );
     const user = ctx[1];
     if (user?.role !== "user") return;
     expect(user.content).toContain("2026-04-22T10:00:00.000Z");
@@ -156,7 +201,12 @@ describe("synthesizeOpeningContext — task_fire payload", () => {
   });
 
   test("renderTaskIntent surfaces firedAt ISO and intent text exactly once", async () => {
-    const ctx = await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, makeDefaultSignal());
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      taskPayload,
+      agent,
+      makeDefaultSignal(),
+    );
     const user = ctx[1];
     if (user?.role !== "user") return;
     const isoCount = (user.content.match(/2026-04-22T10:00:00\.000Z/g) ?? []).length;
