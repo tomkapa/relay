@@ -97,6 +97,20 @@ describeOrSkip("migrate (integration)", () => {
       const memoryIdxNames = new Set(memoryIdx.map((r) => r.indexname));
       expect(memoryIdxNames.has("memory_tenant_idx")).toBe(true);
       expect(memoryIdxNames.has("memory_agent_kind_idx")).toBe(true);
+      // RELAY-131: HNSW index for ANN retrieval.
+      expect(memoryIdxNames.has("memory_embedding_hnsw_idx")).toBe(true);
+
+      // RELAY-131: Per-agent tunable columns added to agents table.
+      const agentTunableCols = await sql<{ column_name: string }[]>`
+        SELECT column_name
+          FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'agents'
+           AND column_name IN ('memory_default_importance', 'memory_half_life_days', 'memory_alpha')
+      `;
+      const tunableColNames = new Set(agentTunableCols.map((r) => r.column_name));
+      expect(tunableColNames.has("memory_default_importance")).toBe(true);
+      expect(tunableColNames.has("memory_half_life_days")).toBe(true);
+      expect(tunableColNames.has("memory_alpha")).toBe(true);
 
       const envelopeTable = await sql<{ exists: boolean }[]>`
         SELECT EXISTS (

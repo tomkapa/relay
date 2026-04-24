@@ -26,6 +26,8 @@ coveragePathIgnorePatterns = [
   "src/agent/create.ts",
   # Memory write path — DB shell, covered by test/integration/memory/insert.test.ts.
   "src/memory/insert.ts",
+  # Memory retrieval path — DB shell, covered by test/integration/memory/retrieve.test.ts.
+  "src/memory/retrieve.ts",
   # Agent load — DB shell, covered by test/integration/trigger/handlers.test.ts.
   "src/agent/load.ts",
   # Session creation — DB shell, covered by test/integration/trigger/handlers.test.ts.
