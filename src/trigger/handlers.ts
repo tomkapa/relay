@@ -38,6 +38,7 @@ import { EMBEDDING_CALL_TIMEOUT_MS } from "../memory/limits.ts";
 import type { ModelClient } from "../session/model.ts";
 import type { ToolRegistry } from "../session/tools.ts";
 import { runTurnLoop } from "../session/turn-loop.ts";
+import type { HookResult } from "../hook/types.ts";
 import type { Message } from "../session/turn.ts";
 import { closeSession } from "../session/close.ts";
 import type { SessionCloseError, SessionEndReason } from "../session/close.ts";
@@ -50,8 +51,6 @@ export type HandlerDeps = {
   readonly tools: ToolRegistry;
   readonly embedder: EmbeddingClient;
 };
-
-type HookResult = { decision: "approve" } | { decision: "deny"; reason: string };
 
 // Pass-through hook seam for session creation. Replaced by RELAY-36 evaluator; named params
 // are omitted here — the real evaluator uses them.

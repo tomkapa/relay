@@ -17,6 +17,7 @@ import type { ToolRegistry, ToolResult } from "../../../src/session/tools.ts";
 import { runTurnLoop } from "../../../src/session/turn-loop.ts";
 import type { Message, ModelResponse, TextBlock, ToolUseBlock } from "../../../src/session/turn.ts";
 import { InMemoryToolRegistry, echoTool } from "../../../src/session/tools-inmemory.ts";
+import type { HookResult, PostToolUsePayload, PreToolUsePayload } from "../../../src/hook/types.ts";
 import {
   installMetricFixture,
   uninstallMetricFixture,
@@ -466,5 +467,293 @@ describe("saturation counters — tool dispatch", () => {
         "relay.tool.name": "ghost",
       }),
     ).toBe(1);
+  });
+});
+
+const approveStub: (p: PreToolUsePayload | PostToolUsePayload) => Promise<HookResult> = () =>
+  Promise.resolve({ decision: "approve" });
+
+describe("hook seams — call order and payloads", () => {
+  beforeEach(() => {
+    clock = new FakeClock(1_000_000);
+    sql = makeFakeSql();
+    ids = makeIds();
+  });
+
+  test("preToolUse called before invoke, postToolUse called after (ordered log)", async () => {
+    const log: string[] = [];
+
+    const preStub: (p: PreToolUsePayload) => Promise<HookResult> = () => {
+      log.push("pre");
+      return Promise.resolve({ decision: "approve" });
+    };
+    const postStub: (p: PostToolUsePayload) => Promise<HookResult> = () => {
+      log.push("post");
+      return Promise.resolve({ decision: "approve" });
+    };
+
+    let callCount = 0;
+    const model: ModelClient = {
+      complete: () => {
+        callCount++;
+        if (callCount === 1)
+          return Promise.resolve(toolUseResponse("tc_1", "echo", { text: "ping" }));
+        return Promise.resolve(textResponse("done"));
+      },
+    };
+    const spyRegistry: ToolRegistry = {
+      list: (): readonly ToolSchema[] => [echoTool.schema],
+      invoke: (req) => {
+        log.push("invoke");
+        return echoTool.invoke(req.input, req.ctx, req.signal);
+      },
+    };
+
+    const result = await runTurnLoop(
+      {
+        sql,
+        clock,
+        model,
+        tools: spyRegistry,
+        maxTurns: 10,
+        hooks: { preToolUse: preStub, postToolUse: postStub },
+      },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(log).toEqual(["pre", "invoke", "post"]);
+  });
+
+  test("preToolUse receives correct payload fields", async () => {
+    const captured: PreToolUsePayload[] = [];
+
+    const preStub = (p: PreToolUsePayload): Promise<HookResult> => {
+      captured.push(p);
+      return Promise.resolve({ decision: "approve" });
+    };
+
+    let callCount = 0;
+    const model: ModelClient = {
+      complete: () => {
+        callCount++;
+        if (callCount === 1)
+          return Promise.resolve(toolUseResponse("tool-use-id-42", "echo", { text: "hello" }));
+        return Promise.resolve(textResponse("done"));
+      },
+    };
+    const tools = new InMemoryToolRegistry([echoTool]);
+
+    await runTurnLoop(
+      {
+        sql,
+        clock,
+        model,
+        tools,
+        maxTurns: 10,
+        hooks: { preToolUse: preStub, postToolUse: approveStub },
+      },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+
+    expect(captured).toHaveLength(1);
+    const p = captured[0];
+    assert(p !== undefined, "preToolUse must have been called");
+    expect(p.toolUseId).toBe("tool-use-id-42");
+    expect(p.toolName).toBe("echo");
+    expect(p.toolInput).toEqual({ text: "hello" });
+    expect(p.sessionId).toBe(ids.sessionId);
+    expect(p.agentId).toBe(ids.agentId);
+    expect(p.tenantId).toBe(ids.tenantId);
+    expect(typeof p.turnId).toBe("string");
+    expect(p.turnId.length).toBeGreaterThan(0);
+  });
+
+  test("postToolUse receives correct payload fields including outcome=invoked", async () => {
+    const captured: PostToolUsePayload[] = [];
+
+    const postStub = (p: PostToolUsePayload): Promise<HookResult> => {
+      captured.push(p);
+      return Promise.resolve({ decision: "approve" });
+    };
+
+    let callCount = 0;
+    const model: ModelClient = {
+      complete: () => {
+        callCount++;
+        if (callCount === 1)
+          return Promise.resolve(toolUseResponse("tu-99", "echo", { text: "world" }));
+        return Promise.resolve(textResponse("done"));
+      },
+    };
+    const tools = new InMemoryToolRegistry([echoTool]);
+
+    await runTurnLoop(
+      {
+        sql,
+        clock,
+        model,
+        tools,
+        maxTurns: 10,
+        hooks: { preToolUse: approveStub, postToolUse: postStub },
+      },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+
+    expect(captured).toHaveLength(1);
+    const p = captured[0];
+    assert(p !== undefined, "postToolUse must have been called");
+    expect(p.toolUseId).toBe("tu-99");
+    expect(p.toolName).toBe("echo");
+    expect(p.outcome).toBe("invoked");
+    expect(p.sessionId).toBe(ids.sessionId);
+    expect(p.agentId).toBe(ids.agentId);
+    expect(p.tenantId).toBe(ids.tenantId);
+  });
+
+  test("postToolUse outcome=tool_error when tool returns error", async () => {
+    const captured: PostToolUsePayload[] = [];
+    const postStub = (p: PostToolUsePayload): Promise<HookResult> => {
+      captured.push(p);
+      return Promise.resolve({ decision: "approve" });
+    };
+
+    const errorRegistry: ToolRegistry = {
+      list: (): readonly ToolSchema[] => [{ name: "boom", inputSchema: { type: "object" } }],
+      invoke: (): Promise<ToolResult> =>
+        Promise.resolve({ ok: false, errorMessage: "boom failed" }),
+    };
+
+    let callCount = 0;
+    const model: ModelClient = {
+      complete: () => {
+        callCount++;
+        if (callCount === 1) {
+          const b: ToolUseBlock = { type: "tool_use", id: "tu-boom", name: "boom", input: {} };
+          return Promise.resolve({
+            content: [b],
+            stopReason: "tool_use",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          });
+        }
+        return Promise.resolve(textResponse("recovered"));
+      },
+    };
+
+    await runTurnLoop(
+      {
+        sql,
+        clock,
+        model,
+        tools: errorRegistry,
+        maxTurns: 10,
+        hooks: { preToolUse: approveStub, postToolUse: postStub },
+      },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.outcome).toBe("tool_error");
+  });
+});
+
+describe("hook seams — relay.hook.evaluation_total counter", () => {
+  let fixture: MetricFixture;
+
+  beforeEach(() => {
+    fixture = installMetricFixture();
+    clock = new FakeClock(1_000_000);
+    sql = makeFakeSql();
+    ids = makeIds();
+  });
+
+  afterEach(async () => {
+    await uninstallMetricFixture();
+  });
+
+  test("one tool_use block → evaluation_total=2 (pre+post), both decision=approve, layer=system", async () => {
+    let callCount = 0;
+    const model: ModelClient = {
+      complete: () => {
+        callCount++;
+        if (callCount === 1)
+          return Promise.resolve(toolUseResponse("tc_1", "echo", { text: "ping" }));
+        return Promise.resolve(textResponse("done"));
+      },
+    };
+    const tools = new InMemoryToolRegistry([echoTool]);
+
+    const result = await runTurnLoop(
+      { sql, clock, model, tools, maxTurns: 10 },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+    expect(result.ok).toBe(true);
+
+    const rm = await fixture.collect();
+    expect(sumCounter(rm, "relay.hook.evaluation_total")).toBe(2);
+    expect(
+      sumCounter(rm, "relay.hook.evaluation_total", {
+        "relay.hook.event": "pre_tool_use",
+        "relay.hook.decision": "approve",
+        "relay.hook.layer": "system",
+      }),
+    ).toBe(1);
+    expect(
+      sumCounter(rm, "relay.hook.evaluation_total", {
+        "relay.hook.event": "post_tool_use",
+        "relay.hook.decision": "approve",
+        "relay.hook.layer": "system",
+      }),
+    ).toBe(1);
+  });
+
+  test("two tool_use blocks in one turn → evaluation_total=4", async () => {
+    let callCount = 0;
+    const model: ModelClient = {
+      complete: () => {
+        callCount++;
+        if (callCount === 1)
+          return Promise.resolve({
+            content: [
+              { type: "tool_use" as const, id: "tc_a", name: "echo", input: { text: "a" } },
+              { type: "tool_use" as const, id: "tc_b", name: "echo", input: { text: "b" } },
+            ],
+            stopReason: "tool_use" as const,
+            usage: { inputTokens: 5, outputTokens: 3 },
+          });
+        return Promise.resolve(textResponse("done"));
+      },
+    };
+    const tools = new InMemoryToolRegistry([echoTool]);
+
+    const result = await runTurnLoop(
+      { sql, clock, model, tools, maxTurns: 10 },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+    expect(result.ok).toBe(true);
+
+    const rm = await fixture.collect();
+    expect(sumCounter(rm, "relay.hook.evaluation_total")).toBe(4);
+  });
+
+  test("evaluation_total carries tool_name attribute", async () => {
+    let callCount = 0;
+    const model: ModelClient = {
+      complete: () => {
+        callCount++;
+        if (callCount === 1)
+          return Promise.resolve(toolUseResponse("tc_1", "echo", { text: "ping" }));
+        return Promise.resolve(textResponse("done"));
+      },
+    };
+    const tools = new InMemoryToolRegistry([echoTool]);
+
+    await runTurnLoop(
+      { sql, clock, model, tools, maxTurns: 10 },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+
+    const rm = await fixture.collect();
+    expect(sumCounter(rm, "relay.hook.evaluation_total", { "relay.tool.name": "echo" })).toBe(2);
   });
 });

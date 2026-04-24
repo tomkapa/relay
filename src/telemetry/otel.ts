@@ -23,6 +23,8 @@ export const tracer: Tracer = trace.getTracer(INSTRUMENTATION_NAME, INSTRUMENTAT
 export const meter: Meter = metrics.getMeter(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
 export const logger: Logger = logs.getLogger(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
 
+export type { Attributes, Counter };
+
 // Stable, low-cardinality span names. Dynamic values go on attributes (CLAUDE.md §2).
 // Add new names here; never inline string literals at call sites.
 export const SpanName = {
@@ -58,6 +60,7 @@ export const Attr = {
   ChainId: "relay.chain.id",
   Depth: "relay.depth",
   HookId: "relay.hook.id",
+  HookEvent: "relay.hook.event",
   HookLayer: "relay.hook.layer",
   HookDecision: "relay.hook.decision",
   ToolName: "relay.tool.name",
