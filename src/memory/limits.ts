@@ -24,3 +24,12 @@ export const USAGE_DECAY_PER_MONTH = 0.02;
 
 // Max entries the consolidation pass processes in one run. Keeps the pass bounded.
 export const MAX_EVENTS_PER_CONSOLIDATION = 500;
+
+// Upper bound on a single embed() HTTP call. Detects hung connections before the caller's
+// per-tool / per-turn budget expires (CLAUDE §5 — every async op has a timeout).
+export const EMBEDDING_CALL_TIMEOUT_MS = 10_000;
+
+// UTF-8 byte cap for embed() input. Mirrors MAX_ENTRY_TEXT_BYTES so the embedder truncates
+// on the same boundary as the writer — vector space stays consistent with stored text.
+// OpenAI's hard limit is ~8192 tokens (~30 KB); 8 KB leaves generous headroom.
+export const MAX_EMBED_INPUT_BYTES = MAX_ENTRY_TEXT_BYTES;
