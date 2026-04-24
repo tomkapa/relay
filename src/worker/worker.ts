@@ -8,7 +8,7 @@ import type { Sql } from "postgres";
 import { AssertionError, assert } from "../core/assert.ts";
 import type { Clock } from "../core/clock.ts";
 import type { Result } from "../core/result.ts";
-import { Attr, SpanName, counter, emit, withSpan } from "../telemetry/otel.ts";
+import { Attr, SpanName, counter, emit, withRemoteParent, withSpan } from "../telemetry/otel.ts";
 import {
   complete as dbComplete,
   dequeue as dbDequeue,
@@ -113,34 +113,32 @@ async function pollOnce(
   deps: WorkerDeps,
   signal: AbortSignal,
 ): Promise<"processed" | "idle" | "error"> {
-  return withSpan(SpanName.WorkerTick, { [Attr.WorkerId]: deps.workerId }, async () => {
-    const now = new Date(deps.clock.now());
-    const dqResult = await deps.queue.dequeue({
-      workerId: deps.workerId,
-      limit: 1,
-      now,
-    });
-
-    if (!dqResult.ok) {
-      emit("ERROR", "worker.dequeue.error", { "relay.queue.error": dqResult.error.kind });
-      return "error";
-    }
-
-    const items = dqResult.value;
-    assert(items.length <= 1, "worker: dequeue limit=1 returned more than 1 item", {
-      count: items.length,
-    });
-
-    if (items.length === 0) return "idle";
-
-    const item = items[0];
-    assert(item !== undefined, "worker: items[0] undefined despite length check");
-
-    if (signal.aborted) return "idle";
-
-    await processItem(deps, item, signal);
-    return "processed";
+  const now = new Date(deps.clock.now());
+  const dqResult = await deps.queue.dequeue({
+    workerId: deps.workerId,
+    limit: 1,
+    now,
   });
+
+  if (!dqResult.ok) {
+    emit("ERROR", "worker.dequeue.error", { "relay.queue.error": dqResult.error.kind });
+    return "error";
+  }
+
+  const items = dqResult.value;
+  assert(items.length <= 1, "worker: dequeue limit=1 returned more than 1 item", {
+    count: items.length,
+  });
+
+  if (items.length === 0) return "idle";
+
+  const item = items[0];
+  assert(item !== undefined, "worker: items[0] undefined despite length check");
+
+  if (signal.aborted) return "idle";
+
+  await processItem(deps, item, signal);
+  return "processed";
 }
 
 // Process a single work item: run handler concurrently with lease renewal,
@@ -159,16 +157,18 @@ async function processItem(deps: WorkerDeps, item: WorkItem, signal: AbortSignal
   // leave the renew loop orphaned, firing renewLease queries after the worker has exited.
   let handlerResult: Result<void, HandlerError>;
   try {
-    handlerResult = await withSpan(
-      SpanName.WorkerHandle,
-      {
-        [Attr.WorkId]: item.id,
-        [Attr.WorkKind]: item.kind,
-      },
-      async () => {
-        const handler = deps.dispatcher[item.kind];
-        return handler(item, signal);
-      },
+    handlerResult = await withRemoteParent(item.traceparent, () =>
+      withSpan(
+        SpanName.WorkerHandle,
+        {
+          [Attr.WorkId]: item.id,
+          [Attr.WorkKind]: item.kind,
+        },
+        async () => {
+          const handler = deps.dispatcher[item.kind];
+          return handler(item, signal);
+        },
+      ),
     );
   } finally {
     renewCtrl.abort();

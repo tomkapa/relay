@@ -4,6 +4,7 @@ import { TenantId } from "../../../src/ids.ts";
 import {
   MAX_DEQUEUE_BATCH,
   MAX_PAYLOAD_REF_LEN,
+  MAX_TRACEPARENT_LEN,
   MAX_WORK_QUEUE_ROWS_PER_TENANT,
   MAX_WORKER_ID_LEN,
 } from "../../../src/work_queue/limits.ts";
@@ -91,6 +92,28 @@ describe("validateEnqueue", () => {
       if (r.error.kind === "payload_ref_too_long") {
         expect(r.error.length).toBe(MAX_PAYLOAD_REF_LEN + 1);
         expect(r.error.max).toBe(MAX_PAYLOAD_REF_LEN);
+      }
+    }
+  });
+
+  test("accepts null traceparent (enqueue without active trace context)", () => {
+    const r = validateEnqueue({ ...base, traceparent: null });
+    expect(r.ok).toBe(true);
+  });
+
+  test("accepts a W3C-format traceparent at the cap", () => {
+    const r = validateEnqueue({ ...base, traceparent: "x".repeat(MAX_TRACEPARENT_LEN) });
+    expect(r.ok).toBe(true);
+  });
+
+  test("rejects traceparent beyond the cap", () => {
+    const r = validateEnqueue({ ...base, traceparent: "x".repeat(MAX_TRACEPARENT_LEN + 1) });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.kind).toBe("traceparent_too_long");
+      if (r.error.kind === "traceparent_too_long") {
+        expect(r.error.length).toBe(MAX_TRACEPARENT_LEN + 1);
+        expect(r.error.max).toBe(MAX_TRACEPARENT_LEN);
       }
     }
   });
@@ -183,6 +206,7 @@ describe("rowToItem", () => {
     payload_ref: "session:1",
     scheduled_at: new Date("2026-04-21T12:00:00Z"),
     attempts: 0,
+    traceparent: null,
   };
 
   test("maps snake_case DB fields to branded camelCase item", () => {
@@ -192,6 +216,13 @@ describe("rowToItem", () => {
     expect(item.kind).toBe("session_start");
     expect(item.payloadRef).toBe("session:1");
     expect(item.attempts).toBe(0);
+    expect(item.traceparent).toBeNull();
+  });
+
+  test("round-trips a non-null traceparent", () => {
+    const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    const item = rowToItem({ ...base, traceparent: tp });
+    expect(item.traceparent).toBe(tp);
   });
 
   test("accepts every WorkKind in the table", () => {

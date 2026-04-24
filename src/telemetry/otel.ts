@@ -4,14 +4,17 @@
 
 import { logs, SeverityNumber, type Logger } from "@opentelemetry/api-logs";
 import {
+  context,
   metrics,
   SpanStatusCode,
   trace,
+  TraceFlags,
   type Attributes,
   type Counter,
   type Histogram,
   type Meter,
   type Span,
+  type SpanContext,
   type Tracer,
   type UpDownCounter,
 } from "@opentelemetry/api";
@@ -40,8 +43,6 @@ export const SpanName = {
   ConnectorDispatch: "connector.dispatch",
   TriggerIngest: "trigger.ingest",
   TriggerSynthesize: "trigger.synthesize",
-  WorkerPick: "worker.pick",
-  WorkerTick: "worker.tick",
   WorkerHandle: "worker.handle",
   SessionClose: "session.close",
   SessionSyncDispatch: "session.sync.dispatch",
@@ -92,6 +93,8 @@ export const Attr = {
   EmbeddingInputBytes: "relay.embedding.input_bytes",
   MemoryInjectedCount: "relay.memory.injected_count",
   MemoryInjectionSkipped: "relay.memory.injection.skipped_reason",
+  SyncWaitMs: "relay.http.trigger.sync_wait_ms",
+  SessionDurationMs: "relay.session.duration_ms",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 
@@ -113,6 +116,62 @@ export async function withSpan<T>(
       span.end();
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// W3C Trace Context propagation (cross-process, via the work queue).
+//
+// Format: "00-<32 hex traceId>-<16 hex spanId>-<2 hex flags>" (W3C Trace Context §3.2).
+// We serialize/parse manually — it's a single line of spec and keeps us free of a
+// propagator dep in tests (NodeSDK registers one at boot, but tests skip boot).
+
+const TRACEPARENT_RE = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+const INVALID_TRACE_ID = "00000000000000000000000000000000";
+const INVALID_SPAN_ID = "0000000000000000";
+
+// Serialize the active SpanContext as a W3C traceparent. Returns null when there is no
+// valid active context (no span open, or context is the no-op root).
+export function captureTraceparent(): string | null {
+  const ctx = trace.getSpanContext(context.active());
+  if (ctx === undefined) return null;
+  if (!trace.isSpanContextValid(ctx)) return null;
+  const flags = ctx.traceFlags.toString(16).padStart(2, "0");
+  return `00-${ctx.traceId}-${ctx.spanId}-${flags}`;
+}
+
+// Parse a W3C traceparent into a remote SpanContext. Returns null for any malformed
+// value (including the `ff` reserved version and the all-zero id sentinels).
+export function parseTraceparent(raw: string): SpanContext | null {
+  const m = TRACEPARENT_RE.exec(raw);
+  if (m === null) return null;
+  const version = m[1];
+  const traceId = m[2];
+  const spanId = m[3];
+  const flagsStr = m[4];
+  if (
+    version === undefined ||
+    traceId === undefined ||
+    spanId === undefined ||
+    flagsStr === undefined
+  ) {
+    return null;
+  }
+  if (version === "ff") return null;
+  if (traceId === INVALID_TRACE_ID) return null;
+  if (spanId === INVALID_SPAN_ID) return null;
+  const traceFlags = parseInt(flagsStr, 16) & TraceFlags.SAMPLED;
+  return { traceId, spanId, traceFlags, isRemote: true };
+}
+
+// Run `fn` with the parsed parent installed as the active span context. A null or
+// malformed traceparent degrades to calling `fn` directly — cross-process correlation
+// is best-effort; a broken parent must never block the work.
+export function withRemoteParent<T>(traceparent: string | null, fn: () => Promise<T>): Promise<T> {
+  if (traceparent === null) return fn();
+  const parent = parseTraceparent(traceparent);
+  if (parent === null) return fn();
+  const ctx = trace.setSpanContext(context.active(), parent);
+  return context.with(ctx, fn);
 }
 
 // Structured logs. Severity + short event name + flat attribute bag. Never interpolate values

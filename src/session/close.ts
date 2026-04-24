@@ -7,7 +7,7 @@ import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
 import { TenantId, type AgentId, type SessionId, type TenantId as TenantIdBrand } from "../ids.ts";
-import { Attr, SpanName, counter, emit, histogram, withSpan } from "../telemetry/otel.ts";
+import { Attr, SpanName, emit, withSpan } from "../telemetry/otel.ts";
 
 export type SyncCloseReason = SessionEndReason["kind"];
 
@@ -72,7 +72,7 @@ export async function closeSession(
       [Attr.AgentId]: spec.agentId,
       [Attr.SessionCloseReason]: spec.reason.kind,
     },
-    async () => {
+    async (span) => {
       const now = new Date(clock.now());
 
       const lookup = await sql<
@@ -136,14 +136,7 @@ export async function closeSession(
           });
         }
 
-        // already_closed path is silent — first closer already recorded; counting both double-counts.
-        counter("session.closed_total").add(1, {
-          [Attr.TenantId]: spec.tenantId,
-          [Attr.SessionCloseReason]: spec.reason.kind,
-        });
-        histogram("session.duration_ms").record(outcome.at.getTime() - row.created_at.getTime(), {
-          [Attr.TenantId]: spec.tenantId,
-        });
+        span.setAttribute(Attr.SessionDurationMs, outcome.at.getTime() - row.created_at.getTime());
       }
 
       return ok(outcome);

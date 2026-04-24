@@ -187,6 +187,7 @@ describeOrSkip("session_start — message handler", () => {
         kind: "session_start",
         payloadRef: envelopeResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 
@@ -238,6 +239,7 @@ describeOrSkip("session_start — message handler", () => {
         kind: "session_start",
         payloadRef: envelopeResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 
@@ -280,6 +282,7 @@ describeOrSkip("task_fire handler", () => {
         kind: "task_fire",
         payloadRef: taskId,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 
@@ -330,6 +333,7 @@ describeOrSkip("idempotency", () => {
         kind: "session_start",
         payloadRef: envelopeResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 
@@ -385,6 +389,7 @@ describeOrSkip("tenant mismatch", () => {
         kind: "session_start",
         payloadRef: envelopeResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 
@@ -438,6 +443,7 @@ describeOrSkip("unknown agent", () => {
         kind: "session_start",
         payloadRef: envelopeResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 
@@ -496,6 +502,7 @@ describeOrSkip("oversized envelope", () => {
         kind: "session_start",
         payloadRef: envelopeId,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 
@@ -545,6 +552,7 @@ describeOrSkip("inbound_message handler — happy path", () => {
         kind: "inbound_message",
         payloadRef: inboundResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 
@@ -583,6 +591,7 @@ describeOrSkip("inbound_message handler — happy path", () => {
           kind: "inbound_message",
           payloadRef: inboundResult.value,
           scheduledAt: new Date(clock.now()),
+          traceparent: null,
           attempts: 1,
         };
         const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
@@ -647,6 +656,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         kind: "inbound_message",
         payloadRef: "not-a-uuid",
         scheduledAt: new Date(0),
+        traceparent: null,
         attempts: 1,
       };
       const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
@@ -674,6 +684,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         kind: "inbound_message",
         payloadRef: randomUUID(),
         scheduledAt: new Date(0),
+        traceparent: null,
         attempts: 1,
       };
       const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
@@ -716,6 +727,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         kind: "inbound_message",
         payloadRef: inboundResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
       const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
@@ -759,6 +771,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         kind: "inbound_message",
         payloadRef: inboundResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
       const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
@@ -806,6 +819,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         kind: "inbound_message",
         payloadRef: inboundResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
       const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
@@ -854,6 +868,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         kind: "inbound_message",
         payloadRef: inboundResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
       const result = await triggerHandlers(fakeDeps(sql, clock)).inbound_message(
@@ -901,6 +916,7 @@ describeOrSkip("session_start — turn loop wiring", () => {
         kind: "session_start",
         payloadRef: envelopeResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 
@@ -959,6 +975,7 @@ describeOrSkip("session_start — turn loop wiring", () => {
         kind: "session_start",
         payloadRef: envelopeResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 
@@ -1014,6 +1031,7 @@ describeOrSkip("session_start — turn loop wiring", () => {
         kind: "session_start",
         payloadRef: envelopeResult.value,
         scheduledAt: new Date(clock.now()),
+        traceparent: null,
         attempts: 1,
       };
 

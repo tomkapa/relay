@@ -10,7 +10,7 @@ import { upDownCounter } from "../telemetry/otel.ts";
 import { MAX_PENDING_SYNC_WAITERS } from "./limits.ts";
 
 // Hoisted so register/settle pay a direct reference, not a string lookup on every call.
-const pendingWaiters = upDownCounter("http.trigger.pending_sync_waiters");
+const pendingWaiters = upDownCounter("relay.http.trigger.pending_sync_waiters");
 
 export type SyncOutcome =
   | {
