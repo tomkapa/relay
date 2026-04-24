@@ -10,6 +10,7 @@ import type { AgentId, SessionId, TenantId } from "../ids.ts";
 import { TurnId, mintId } from "../ids.ts";
 import { Attr, SpanName, counter, withSpan } from "../telemetry/otel.ts";
 import type { ModelClient, ToolSchema } from "./model.ts";
+import { assertNever } from "../core/assert.ts";
 import { MODEL_CALL_TIMEOUT_MS, MAX_TURNS_PER_SESSION, TOOL_CALL_TIMEOUT_MS } from "./limits.ts";
 import type { ToolRegistry, ToolResult } from "./tools.ts";
 import { insertTurn } from "./turn-persistence.ts";
@@ -309,9 +310,19 @@ export async function runTurnLoop(
       messages.push({ role: "user", content: turn.toolResults });
     }
 
-    if (turn.response.stopReason === "end_turn") {
-      turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "end_turn" });
-      return ok({ turns, finalResponse: turn.response });
+    switch (turn.response.stopReason) {
+      case "end_turn":
+        turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "end_turn" });
+        return ok({ turns, finalResponse: turn.response });
+      case "tool_use":
+      case "max_tokens":
+      case "stop_sequence":
+      // intentional fallthrough: continue loop
+      case "pause_turn":
+      case "refusal":
+        break;
+      default:
+        assertNever(turn.response.stopReason, "runTurnLoop: unhandled StopReason");
     }
   }
 
