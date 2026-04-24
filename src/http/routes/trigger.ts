@@ -49,8 +49,8 @@ type TriggerBody = {
 
 const TriggerBodySchema = z
   .object({
-    tenantId: z.string().uuid(),
-    targetAgentId: z.string().uuid(),
+    tenantId: z.uuid(),
+    targetAgentId: z.uuid(),
     sender: z.object({
       type: z.enum(["human", "agent", "system"]),
       id: z.string().min(1).max(MAX_SENDER_EXTERNAL_ID_LEN),

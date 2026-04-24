@@ -15,7 +15,8 @@ import { hostname } from "node:os";
 import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { Resource, envDetector, hostDetector } from "@opentelemetry/resources";
+import { resourceFromAttributes, envDetector, hostDetector } from "@opentelemetry/resources";
+import type { Resource } from "@opentelemetry/resources";
 import { BatchLogRecordProcessor } from "@opentelemetry/sdk-logs";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
@@ -57,7 +58,7 @@ export function buildResource(): Resource {
     serviceName !== undefined && serviceName.length > 0,
     "telemetry: OTEL_SERVICE_NAME must be set",
   );
-  return new Resource({
+  return resourceFromAttributes({
     [ATTR_SERVICE_NAME]: serviceName,
     [ATTR_SERVICE_VERSION]: readPackageVersion(),
     [ATTR_SERVICE_INSTANCE_ID]: `${hostname()}:${process.pid.toString()}`,

@@ -13,8 +13,8 @@ import type { ReplyRegistry, SyncOutcome } from "./reply-registry.ts";
 export const SYNC_CHANNEL = "session_sync_close";
 
 const NotifyPayloadSchema = z.object({
-  envelopeId: z.string().uuid(),
-  sessionId: z.string().uuid(),
+  envelopeId: z.uuid(),
+  sessionId: z.uuid(),
   reason: z.enum(["end_turn", "turn_cap_exceeded"]),
 });
 

@@ -30,7 +30,14 @@ const ModelResponseSchema = z.object({
       }),
     ]),
   ),
-  stopReason: z.enum(["end_turn", "tool_use", "max_tokens", "stop_sequence"]),
+  stopReason: z.enum([
+    "end_turn",
+    "tool_use",
+    "max_tokens",
+    "stop_sequence",
+    "pause_turn",
+    "refusal",
+  ]),
   usage: z.object({
     inputTokens: z.number().int().min(0),
     outputTokens: z.number().int().min(0),
