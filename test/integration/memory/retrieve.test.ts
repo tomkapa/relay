@@ -18,7 +18,14 @@ import {
   uninstallMetricFixture,
   type MetricFixture,
 } from "../../helpers/metrics.ts";
-import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
+import {
+  DB_URL,
+  HOOK_TIMEOUT_MS,
+  MIGRATIONS_DIR,
+  describeOrSkip,
+  makeTestKey,
+  resetDb,
+} from "../helpers.ts";
 
 let sqlRef: Sql | undefined;
 
@@ -106,6 +113,7 @@ async function insertMemoryRow(
       text: `memory for dim ${String(embedding.findIndex((v) => v > 0))}`,
       embedding,
       importance: parseImportance(importance),
+      idempotencyKey: makeTestKey(),
     }),
   );
   assert(result.ok, "insertMemoryRow: insert failed");
