@@ -12,7 +12,8 @@ import { evaluateHook } from "./evaluate.ts";
 import { MAX_HOOKS_PER_EVENT } from "./limits.ts";
 import type { PayloadFor } from "./payloads.ts";
 import { evaluateHookRecord } from "./record.ts";
-import { LAYER_ORDER, getRulesForEvent } from "./registry.ts";
+import { LAYER_ORDER } from "./registry.ts";
+import type { HookConfigSnapshot } from "./snapshot.ts";
 import type { Hook, HookDecision, HookEvent, HookLayer } from "./types.ts";
 
 export type AggregateDecision<P> = HookDecision<P>;
@@ -29,13 +30,16 @@ export type RunHooksContext<E extends HookEvent> = {
 export async function runHooks<E extends HookEvent>(
   tx: Sql | TransactionSql,
   clock: Clock,
+  hookConfig: HookConfigSnapshot,
   ctx: RunHooksContext<E>,
   initialPayload: PayloadFor<E>,
 ): Promise<AggregateDecision<PayloadFor<E>>> {
-  // Fast path: all layers empty → approve with no span, no audit rows.
+  const allRules = hookConfig.forEvent(ctx.event);
+
+  // Fast path: no rules in any layer → approve with no span, no audit rows.
   // In MVP this is the common path — org/agent are always empty and many events
   // have no system rules registered.
-  if (LAYER_ORDER.every((layer) => getRulesForEvent(layer, ctx.event).length === 0)) {
+  if (allRules.length === 0) {
     return { decision: "approve" };
   }
 
@@ -43,6 +47,7 @@ export async function runHooks<E extends HookEvent>(
     SpanName.HookRun,
     {
       [Attr.HookEvent]: ctx.event,
+      [Attr.HookSnapshotId]: hookConfig.id,
       [Attr.SessionId]: ctx.sessionId ?? "",
       [Attr.AgentId]: ctx.agentId,
       [Attr.TenantId]: ctx.tenantId,
@@ -57,7 +62,11 @@ export async function runHooks<E extends HookEvent>(
       // Modify threads one running payload across all layers — layer boundaries are invisible to
       // the chain. All matched rules in each layer fire unless a deny stops the bucket early.
       outer: for (const layer of LAYER_ORDER) {
-        const rules = getRulesForEvent(layer, ctx.event);
+        // Filter snapshot rules to this layer. Cast Hook<HookEvent>[] → Hook<E>[] is sound:
+        // snapshot.forEvent(ctx.event) returns only rules registered for ctx.event (type E),
+        // stored as Hook<HookEvent> for heterogeneous storage; narrowing by layer doesn't change
+        // the event type.
+        const rules = allRules.filter((r) => r.layer === layer) as unknown as readonly Hook<E>[];
 
         // Empty bucket — fast path; no audit, no telemetry beyond the wrapping span.
         // In MVP this is the org/agent path on every call.

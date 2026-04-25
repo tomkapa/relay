@@ -9,6 +9,7 @@ import { firstRow } from "../db/utils.ts";
 import { TenantId, type AgentId, type SessionId, type TenantId as TenantIdBrand } from "../ids.ts";
 import { Attr, SpanName, emit, withSpan } from "../telemetry/otel.ts";
 import { runHooks } from "../hook/run.ts";
+import { snapshotHookConfig } from "../hook/snapshot.ts";
 import { HOOK_EVENT } from "../hook/types.ts";
 
 // Close reason tags. Additive union — future tasks (abandoned-after-deadline, admin-force-close)
@@ -102,9 +103,11 @@ export async function closeSession(
           envelopeId: row.envelope_id,
         });
 
+        const hookConfig = snapshotHookConfig(clock);
         const aggregate = await runHooks(
           sql,
           clock,
+          hookConfig,
           {
             event: HOOK_EVENT.SessionEnd,
             tenantId: spec.tenantId,

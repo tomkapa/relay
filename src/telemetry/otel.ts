@@ -80,6 +80,7 @@ export const Attr = {
   HookEvent: "relay.hook.event",
   HookLayer: "relay.hook.layer",
   HookDecision: "relay.hook.decision",
+  HookSnapshotId: "relay.hook.snapshot.id",
   ToolName: "relay.tool.name",
   TriggerKind: "relay.trigger.kind",
   SenderType: "relay.sender.type",
