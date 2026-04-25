@@ -1,6 +1,7 @@
 // Shared hook types used by the registry, evaluator, and call sites.
 
-import type { AgentId, HookRecordId, SessionId, TenantId, ToolUseId, TurnId } from "../ids.ts";
+import type { HookRecordId } from "../ids.ts";
+import type { HookEventPayload, PayloadFor } from "./payloads.ts";
 
 // Canonical three-variant decision. SPEC §Composition — modify is a first-class outcome.
 // `modify` carries a replacement payload; how modify outputs chain is RELAY-139's concern.
@@ -21,8 +22,9 @@ export type HookEvent =
   | "pre_message_receive"
   | "pre_message_send";
 
-// Named constants for HookEvent values. Prefer these over raw string literals at call sites.
-// RELAY-140 will replace this with a stricter branded type and parse boundary.
+// Named constants for HookEvent values. `as const satisfies` preserves the literal type so
+// generic E is correctly inferred from HOOK_EVENT.SessionStart rather than widened to HookEvent.
+// Object.freeze prevents accidental mutation (test verifies isFrozen).
 export const HOOK_EVENT = Object.freeze({
   SessionStart: "session_start",
   SessionEnd: "session_end",
@@ -32,32 +34,7 @@ export const HOOK_EVENT = Object.freeze({
   PreMessageSend: "pre_message_send",
 } as const satisfies Record<string, HookEvent>);
 
-// Payload union — one variant per event kind. Shapes fill in with RELAY-140.
-// Placeholder until the real CEL predicate evaluator needs typed access to the payload.
-export type HookPayload = Record<string, unknown>;
-
-export type PreToolUsePayload = {
-  readonly sessionId: SessionId;
-  readonly agentId: AgentId;
-  readonly tenantId: TenantId;
-  readonly turnId: TurnId;
-  readonly toolUseId: ToolUseId;
-  readonly toolName: string;
-  readonly toolInput: Readonly<Record<string, unknown>>;
-};
-
-export type PostToolUsePayload = {
-  readonly sessionId: SessionId;
-  readonly agentId: AgentId;
-  readonly tenantId: TenantId;
-  readonly turnId: TurnId;
-  readonly toolUseId: ToolUseId;
-  readonly toolName: string;
-  readonly outcome: "invoked" | "tool_error";
-};
-
-// Synchronous predicate over a payload. Matchers are a hot path (called on every event),
-// so async is intentionally excluded — see SPEC §Hooks for the design rationale.
+// Synchronous predicate over a typed payload. Exported for call sites that name the type explicitly.
 export type HookMatcher<TPayload> = (payload: TPayload) => boolean;
 
 // Decision function — may be async for CEL predicates and future LLM-as-judge integrations.
@@ -65,15 +42,19 @@ export type HookDecide<TPayload> = (
   payload: TPayload,
 ) => HookDecision<TPayload> | Promise<HookDecision<TPayload>>;
 
-// Canonical hook record. Stored in the registry (RELAY-138) keyed by event.
+// Canonical hook record. Generic over the event tag so the matcher and decision are
+// typed to exactly the right payload for that event. The default = HookEvent lets the
+// registry store Hook[] (i.e. Hook<HookEvent>) in heterogeneous buckets; registration
+// call sites narrow to a literal (Hook<"pre_tool_use">).
 // id is HookRecordId (UUID or system/<event>/<name>) — not HookId which is UUID-only.
-// HookId stays for the future hook_rules FK (RELAY-225).
-export type Hook<TPayload> = {
+export type Hook<E extends HookEvent = HookEvent> = {
   readonly id: HookRecordId;
   readonly layer: HookLayer;
-  readonly event: HookEvent;
-  readonly matcher: HookMatcher<TPayload>;
-  readonly decision: HookDecide<TPayload>;
+  readonly event: E;
+  readonly matcher: (payload: PayloadFor<E>) => boolean;
+  readonly decision: (
+    payload: PayloadFor<E>,
+  ) => HookDecision<PayloadFor<E>> | Promise<HookDecision<PayloadFor<E>>>;
 };
 
 // Result of evaluating one Hook record. matched=false means the matcher short-circuited
@@ -81,3 +62,6 @@ export type Hook<TPayload> = {
 export type HookEvaluation<TPayload> =
   | { readonly matched: false }
   | { readonly matched: true; readonly decision: HookDecision<TPayload> };
+
+// Re-export for callers that assemble HookEventPayload directly.
+export type { HookEventPayload };

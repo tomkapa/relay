@@ -1,4 +1,4 @@
-// Session close — idempotent write, observational SessionEnd hook seam.
+// Session close — idempotent write, observational SessionEnd hook via registry.
 // SPEC §Session Lifecycle. No migration: sessions.closed_at already exists (0001_init.sql).
 
 import type { Sql } from "postgres";
@@ -8,14 +8,16 @@ import { err, ok, type Result } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
 import { TenantId, type AgentId, type SessionId, type TenantId as TenantIdBrand } from "../ids.ts";
 import { Attr, SpanName, emit, withSpan } from "../telemetry/otel.ts";
-
-export type SyncCloseReason = SessionEndReason["kind"];
+import { runHooks } from "../hook/run.ts";
+import { HOOK_EVENT } from "../hook/types.ts";
 
 // Close reason tags. Additive union — future tasks (abandoned-after-deadline, admin-force-close)
 // extend here. RELAY-93 adds nothing: suspend is NOT a close.
 export type SessionEndReason =
   | { readonly kind: "end_turn" }
   | { readonly kind: "turn_cap_exceeded"; readonly max: number };
+
+export type SyncCloseReason = SessionEndReason["kind"];
 
 export type SessionCloseSpec = Readonly<{
   sessionId: SessionId;
@@ -36,30 +38,10 @@ export type SessionCloseError =
       readonly got: TenantIdBrand;
     };
 
-export type SessionEndPayload = Readonly<{
-  sessionId: SessionId;
-  tenantId: TenantIdBrand;
-  agentId: AgentId;
-  reason: SessionEndReason;
-  closedAt: Date;
-  createdAt: Date;
-}>;
-
-export type HookResult =
-  | { readonly decision: "approve" }
-  | { readonly decision: "deny"; readonly reason: string };
-
-// Pass-through stub. RELAY-37 replaces this with the real evaluator call.
-// Duplicated from src/trigger/handlers.ts deliberately — each stub keeps its own
-// signature until RELAY-37 hoists the shared type into src/hook/.
-export const sessionEndStub: (payload: SessionEndPayload) => Promise<HookResult> = () =>
-  Promise.resolve({ decision: "approve" });
-
 export async function closeSession(
   sql: Sql,
   clock: Clock,
   spec: SessionCloseSpec,
-  hookFn: (payload: SessionEndPayload) => Promise<HookResult> = sessionEndStub,
 ): Promise<Result<SessionCloseOutcome, SessionCloseError>> {
   assert(spec.sessionId.length > 0, "closeSession: sessionId non-empty");
   assert(spec.tenantId.length > 0, "closeSession: tenantId non-empty");
@@ -111,8 +93,8 @@ export async function closeSession(
           ? { kind: "already_closed", at: row.closed_at ?? now }
           : { kind: "closed", at: firstRow(updated, "closeSession.update").closed_at };
 
-      // Fires after commit so RELAY-37 audit counts align with the closed_total counter.
-      // A deny does not unwind the close — the loop has already returned; nothing to roll back.
+      // Fires after commit so audit counts align with the closed_total counter.
+      // SessionEnd is observational — deny logs a warning but does NOT unwind the close.
       if (outcome.kind === "closed") {
         await emitSessionSyncClose(sql, {
           sessionId: spec.sessionId,
@@ -120,19 +102,39 @@ export async function closeSession(
           envelopeId: row.envelope_id,
         });
 
-        const hook = await hookFn({
-          sessionId: spec.sessionId,
-          tenantId: spec.tenantId,
-          agentId: spec.agentId,
-          reason: spec.reason,
-          closedAt: outcome.at,
-          createdAt: row.created_at,
-        });
-        if (hook.decision === "deny") {
+        const aggregate = await runHooks(
+          sql,
+          clock,
+          {
+            event: HOOK_EVENT.SessionEnd,
+            tenantId: spec.tenantId,
+            agentId: spec.agentId,
+            sessionId: spec.sessionId,
+            turnId: null,
+            toolName: null,
+          },
+          {
+            tenantId: spec.tenantId,
+            agentId: spec.agentId,
+            sessionId: spec.sessionId,
+            reason: spec.reason,
+            closedAt: outcome.at,
+            createdAt: row.created_at,
+            durationMs: outcome.at.getTime() - row.created_at.getTime(),
+          },
+        );
+
+        // SessionEnd modify has no semantically meaningful application. Crash on authoring bug.
+        assert(
+          aggregate.decision !== "modify",
+          "closeSession: SessionEnd modify decision is not supported",
+        );
+
+        if (aggregate.decision === "deny") {
           emit("WARN", "session.end.hook_denied", {
             [Attr.SessionId]: spec.sessionId,
             [Attr.TenantId]: spec.tenantId,
-            [Attr.HookReason]: hook.reason,
+            [Attr.HookReason]: aggregate.reason,
           });
         }
 

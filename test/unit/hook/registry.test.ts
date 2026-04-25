@@ -18,17 +18,17 @@ function makeId(tag: string): HookRecordIdType {
   return r.value;
 }
 
-function makeHook(
+function makeHook<E extends HookEvent>(
   tag: string,
-  event: HookEvent = HOOK_EVENT.SessionStart,
+  event: E,
   layer: HookLayer = "system",
-): Hook<unknown> {
+): Hook<E> {
   return {
     id: makeId(tag),
     layer,
     event,
     matcher: () => true,
-    decision: () => Promise.resolve({ decision: "approve" }),
+    decision: () => Promise.resolve({ decision: "approve" as const }),
   };
 }
 
@@ -48,7 +48,7 @@ describe("LAYER_ORDER", () => {
 
 describe("registerHook / getRulesForEvent", () => {
   test("registered system hook is returned by getRulesForEvent", () => {
-    const hook = makeHook("system/session_start/test-a");
+    const hook = makeHook("system/session_start/test-a", HOOK_EVENT.SessionStart);
     registerHook(hook);
     const rules = getRulesForEvent("system", HOOK_EVENT.SessionStart);
     expect(rules.length).toBe(1);
@@ -56,9 +56,9 @@ describe("registerHook / getRulesForEvent", () => {
   });
 
   test("preserves registration order for same (layer, event)", () => {
-    const h1 = makeHook("system/session_start/first");
-    const h2 = makeHook("system/session_start/second");
-    const h3 = makeHook("system/session_start/third");
+    const h1 = makeHook("system/session_start/first", HOOK_EVENT.SessionStart);
+    const h2 = makeHook("system/session_start/second", HOOK_EVENT.SessionStart);
+    const h3 = makeHook("system/session_start/third", HOOK_EVENT.SessionStart);
     registerHook(h1);
     registerHook(h2);
     registerHook(h3);
@@ -120,19 +120,28 @@ describe("registerHook / getRulesForEvent", () => {
   });
 
   test("same hook id allowed in different layers — duplicate check is per-bucket", () => {
-    const id = makeId("system/session_start/shared-id");
     const sysHook = makeHook("system/session_start/shared-id", HOOK_EVENT.SessionStart, "system");
-    const orgHook: Hook<unknown> = { ...sysHook, id, layer: "organization" };
+    const orgHook: Hook<"session_start"> = { ...sysHook, layer: "organization" };
     expect(() => {
       registerHook(sysHook);
       registerHook(orgHook);
     }).not.toThrow();
   });
+
+  test("getRulesForEvent returns ReadonlyArray<Hook<E>> narrowed to the requested event", () => {
+    registerHook(makeHook("system/pre_tool_use/typed-hook", HOOK_EVENT.PreToolUse));
+    const rules = getRulesForEvent("system", HOOK_EVENT.PreToolUse);
+    expect(rules.length).toBe(1);
+    // Compile-time: rules is ReadonlyArray<Hook<"pre_tool_use">>
+    // If the cast in getRulesForEvent is wrong, a later task that uses the typed payload
+    // in a matcher/decision would fail to compile.
+    expect(rules[0]?.event).toBe("pre_tool_use");
+  });
 });
 
 describe("registerHook — assertion failures", () => {
   test("rejects duplicate id in the same (layer, event) bucket → AssertionError", () => {
-    const hook = makeHook("system/session_start/dup");
+    const hook = makeHook("system/session_start/dup", HOOK_EVENT.SessionStart);
     registerHook(hook);
     expect(() => {
       registerHook(hook);
@@ -141,7 +150,9 @@ describe("registerHook — assertion failures", () => {
 
   test("per-(layer,event) cap: 64 system hooks for event E does not block 64 org hooks for same event", () => {
     for (let i = 0; i < MAX_HOOKS_PER_EVENT; i++) {
-      registerHook(makeHook(`system/session_start/sys-hook-${i.toString()}`));
+      registerHook(
+        makeHook(`system/session_start/sys-hook-${i.toString()}`, HOOK_EVENT.SessionStart),
+      );
     }
     // org bucket for the same event is completely independent
     for (let i = 0; i < MAX_HOOKS_PER_EVENT; i++) {
@@ -163,10 +174,10 @@ describe("registerHook — assertion failures", () => {
 
   test("rejects beyond MAX_HOOKS_PER_EVENT within one (layer, event) bucket → AssertionError", () => {
     for (let i = 0; i < MAX_HOOKS_PER_EVENT; i++) {
-      registerHook(makeHook(`system/session_start/hook-${i.toString()}`));
+      registerHook(makeHook(`system/session_start/hook-${i.toString()}`, HOOK_EVENT.SessionStart));
     }
     expect(() => {
-      registerHook(makeHook(`system/session_start/hook-overflow`));
+      registerHook(makeHook(`system/session_start/hook-overflow`, HOOK_EVENT.SessionStart));
     }).toThrow(AssertionError);
   });
 });

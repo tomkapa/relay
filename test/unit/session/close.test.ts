@@ -1,23 +1,20 @@
 // Unit tests for session close. Uses fake Sql and FakeClock; OTel is a no-op in test mode.
 
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import { assert, AssertionError } from "../../../src/core/assert.ts";
 import { FakeClock } from "../../../src/core/clock.ts";
+import { __clearRegistryForTesting, registerHook } from "../../../src/hook/registry.ts";
+import { HOOK_EVENT } from "../../../src/hook/types.ts";
+import { HookRecordId } from "../../../src/ids.ts";
 import {
   AgentId as AgentIdParser,
   SessionId as SessionIdParser,
   TenantId as TenantIdParser,
 } from "../../../src/ids.ts";
 import type { AgentId, SessionId, TenantId } from "../../../src/ids.ts";
-import {
-  closeSession,
-  emitSessionSyncClose,
-  isClosed,
-  type HookResult,
-  type SessionEndPayload,
-} from "../../../src/session/close.ts";
+import { closeSession, emitSessionSyncClose, isClosed } from "../../../src/session/close.ts";
 
 type FakeRow = Record<string, unknown>;
 
@@ -39,12 +36,23 @@ function makeIds(): { sessionId: SessionId; agentId: AgentId; tenantId: TenantId
   return { sessionId: s.value, agentId: a.value, tenantId: t.value };
 }
 
+function makeHookRecordId(tag: string) {
+  const r = HookRecordId.parse(tag);
+  assert(r.ok, "fixture: invalid HookRecordId");
+  return r.value;
+}
+
 let clock: FakeClock;
 let ids: ReturnType<typeof makeIds>;
 
 beforeEach(() => {
   clock = new FakeClock(2_000_000);
   ids = makeIds();
+  __clearRegistryForTesting();
+});
+
+afterEach(() => {
+  __clearRegistryForTesting();
 });
 
 describe("closeSession", () => {
@@ -142,6 +150,7 @@ describe("closeSession", () => {
   test('hook deny does not unwind close — outcome is still {kind:"closed"}', async () => {
     const { sessionId, agentId, tenantId } = ids;
     const nowMs = clock.now();
+    // Fake SQL: lookup, update, agents check (in insertHookAudit), audit row INSERT, pending INSERT
     const sql = makeFakeSql([
       [
         {
@@ -152,16 +161,43 @@ describe("closeSession", () => {
         },
       ],
       [{ closed_at: new Date(nowMs) }],
+      [{ tenant_id: tenantId }], // insertHookAudit: SELECT agents
+      [
+        {
+          // insertHookAudit: INSERT RETURNING
+          id: "00000000-0000-4000-8000-000000000001",
+          hook_id: "system/session_end/test-deny",
+          layer: "system",
+          event: "session_end",
+          matcher_result: true,
+          decision: "deny",
+          reason: "policy violation",
+          latency_ms: 0,
+          tenant_id: String(tenantId),
+          session_id: String(sessionId),
+          agent_id: String(agentId),
+          turn_id: null,
+          tool_name: null,
+          created_at: new Date(nowMs),
+        },
+      ],
+      [], // enqueuePendingSystemMessage: INSERT (no RETURNING)
     ]);
-    const denyHook: (payload: SessionEndPayload) => Promise<HookResult> = () =>
-      Promise.resolve({ decision: "deny", reason: "policy violation" });
 
-    const result = await closeSession(
-      sql,
-      clock,
-      { sessionId, agentId, tenantId, reason: { kind: "end_turn" } },
-      denyHook,
-    );
+    registerHook({
+      id: makeHookRecordId("system/session_end/test-deny"),
+      layer: "system",
+      event: HOOK_EVENT.SessionEnd,
+      matcher: () => true,
+      decision: () => Promise.resolve({ decision: "deny", reason: "policy violation" }),
+    });
+
+    const result = await closeSession(sql, clock, {
+      sessionId,
+      agentId,
+      tenantId,
+      reason: { kind: "end_turn" },
+    });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -170,24 +206,32 @@ describe("closeSession", () => {
 
   test("hook is not called on already_closed path", async () => {
     const { sessionId, agentId, tenantId } = ids;
-    let hookCalled = false;
+    let matcherCalled = false;
     const sql = makeFakeSql([
       [{ tenant_id: tenantId, closed_at: new Date(1_500_000), created_at: new Date(1_000_000) }],
       [],
     ]);
-    const trackingHook: (payload: SessionEndPayload) => Promise<HookResult> = () => {
-      hookCalled = true;
-      return Promise.resolve({ decision: "approve" });
-    };
 
-    await closeSession(
-      sql,
-      clock,
-      { sessionId, agentId, tenantId, reason: { kind: "end_turn" } },
-      trackingHook,
-    );
+    // Register a tracking hook — should NOT be called since the session is already_closed.
+    registerHook({
+      id: makeHookRecordId("system/session_end/track"),
+      layer: "system",
+      event: HOOK_EVENT.SessionEnd,
+      matcher: () => {
+        matcherCalled = true;
+        return true;
+      },
+      decision: () => Promise.resolve({ decision: "approve" }),
+    });
 
-    expect(hookCalled).toBe(false);
+    await closeSession(sql, clock, {
+      sessionId,
+      agentId,
+      tenantId,
+      reason: { kind: "end_turn" },
+    });
+
+    expect(matcherCalled).toBe(false);
   });
 
   test("turn_cap_exceeded reason closes the session", async () => {

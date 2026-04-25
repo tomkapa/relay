@@ -240,6 +240,9 @@ async function finalizeSession(
   item: WorkItem,
   sessionResult: { id: SessionIdBrand; isDuplicate: boolean },
   agentId: AgentIdBrand,
+  chainId: ChainIdBrand,
+  depth: DepthBrand,
+  parentSessionId: SessionIdBrand | null,
 ): Promise<Result<void, HandlerError>> {
   const aggregate = await runHooks(
     deps.sql,
@@ -252,7 +255,15 @@ async function finalizeSession(
       toolName: null,
       event: HOOK_EVENT.SessionStart,
     },
-    { tenantId: item.tenantId, agentId, sessionId: sessionResult.id },
+    {
+      tenantId: item.tenantId,
+      agentId,
+      sessionId: sessionResult.id,
+      chainId,
+      depth,
+      parentSessionId,
+      triggerKind: item.kind,
+    },
   );
   if (aggregate.decision === "deny") {
     return err<HandlerError>({
@@ -337,7 +348,7 @@ async function handleSessionStart(
 
       const session = sessionResult.value;
       if (session.isDuplicate) {
-        return finalizeSession(deps, item, session, payload.targetAgentId);
+        return finalizeSession(deps, item, session, payload.targetAgentId, chainId, depth, null);
       }
 
       const loopResult = await runLoopAndClose(
@@ -350,7 +361,7 @@ async function handleSessionStart(
       );
       if (!loopResult.ok) return loopResult;
 
-      return finalizeSession(deps, item, session, payload.targetAgentId);
+      return finalizeSession(deps, item, session, payload.targetAgentId, chainId, depth, null);
     },
   );
 }
@@ -417,6 +428,10 @@ async function handleTaskFire(
         agentResult.value,
         synthSignal,
       );
+      const context0 = context[0];
+      assert(context0 !== undefined, "handleTaskFire: context[0] must exist");
+      assert(context0.role === "system", "handleTaskFire: context[0] must be system entry");
+      const enrichedSystemPrompt = context0.content;
 
       const sessionResult = await createSession(deps.sql, deps.clock, {
         agentId: payload.agentId,
@@ -435,7 +450,22 @@ async function handleTaskFire(
       });
       if (!sessionResult.ok) return err(mapSessionError(sessionResult.error));
 
-      return finalizeSession(deps, item, sessionResult.value, payload.agentId);
+      const session = sessionResult.value;
+      if (session.isDuplicate) {
+        return finalizeSession(deps, item, session, payload.agentId, chainId, depth, null);
+      }
+
+      const loopResult = await runLoopAndClose(
+        deps,
+        item,
+        session,
+        payload.agentId,
+        enrichedSystemPrompt,
+        context,
+      );
+      if (!loopResult.ok) return loopResult;
+
+      return finalizeSession(deps, item, session, payload.agentId, chainId, depth, null);
     },
   );
 }
@@ -558,8 +588,12 @@ async function handleInboundMessage(
         },
         {
           tenantId: item.tenantId,
-          agentId: targetResult.value.session.agentId,
-          sessionId: payload.targetSessionId,
+          targetAgentId: targetResult.value.session.agentId,
+          targetSessionId: payload.targetSessionId,
+          inboundMessageId: inboundIdResult.value,
+          sender: payload.sender,
+          content: payload.content,
+          receivedAt: payload.receivedAt,
         },
       );
       if (aggregate.decision === "deny") {

@@ -10,7 +10,18 @@ import { migrate } from "../../../src/db/migrate-apply.ts";
 import { __clearRegistryForTesting, registerHook } from "../../../src/hook/registry.ts";
 import { runHooks } from "../../../src/hook/run.ts";
 import { HOOK_EVENT } from "../../../src/hook/types.ts";
-import { AgentId, HookRecordId, SessionId, TenantId } from "../../../src/ids.ts";
+import type { PreToolUsePayload, SessionStartPayload } from "../../../src/hook/payloads.ts";
+import {
+  AgentId,
+  ChainId,
+  Depth,
+  HookRecordId,
+  SessionId,
+  TenantId,
+  ToolUseId,
+  TurnId,
+  mintId,
+} from "../../../src/ids.ts";
 import type {
   AgentId as AgentIdType,
   SessionId as SessionIdType,
@@ -74,6 +85,44 @@ async function setup(sql: Sql): Promise<{
   };
 }
 
+// Build a PreToolUsePayload with an arbitrary toolInput for use in composition tests.
+function makePreToolPayload(
+  ctx: { tenantId: TenantIdType; agentId: AgentIdType; sessionId: SessionIdType },
+  toolInput: Record<string, unknown> = {},
+): PreToolUsePayload {
+  const turnId = mintId(TurnId.parse, "test");
+  const toolUseIdResult = ToolUseId.parse("test-tool-use");
+  assert(toolUseIdResult.ok, "fixture: invalid ToolUseId");
+  return {
+    tenantId: ctx.tenantId,
+    agentId: ctx.agentId,
+    sessionId: ctx.sessionId,
+    turnId,
+    toolUseId: toolUseIdResult.value,
+    toolName: "test_tool",
+    toolInput,
+  };
+}
+
+function makeSessionStartPayload(ctx: {
+  tenantId: TenantIdType;
+  agentId: AgentIdType;
+  sessionId: SessionIdType;
+}): SessionStartPayload {
+  const chainId = mintId(ChainId.parse, "test");
+  const depthResult = Depth.parse(0);
+  assert(depthResult.ok, "fixture: depth out of range");
+  return {
+    tenantId: ctx.tenantId,
+    agentId: ctx.agentId,
+    sessionId: ctx.sessionId,
+    chainId,
+    depth: depthResult.value,
+    parentSessionId: null,
+    triggerKind: "session_start",
+  };
+}
+
 type AuditRow = {
   id: string;
   decision: string;
@@ -117,20 +166,20 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       const aggregate = await runHooks(
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: null,
           event: HOOK_EVENT.SessionStart,
         },
-        {},
+        makeSessionStartPayload(ctx),
       );
 
       expect(aggregate.decision).toBe("approve");
@@ -145,7 +194,7 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       registerHook({
         id: hookId("system/session_start/always-reject"),
@@ -159,14 +208,14 @@ describeOrSkip("runHooks (integration)", () => {
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: null,
           event: HOOK_EVENT.SessionStart,
         },
-        {},
+        makeSessionStartPayload(ctx),
       );
 
       expect(aggregate.decision).toBe("approve");
@@ -181,7 +230,7 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       registerHook({
         id: hookId("system/session_start/always-approve"),
@@ -195,14 +244,14 @@ describeOrSkip("runHooks (integration)", () => {
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: null,
           event: HOOK_EVENT.SessionStart,
         },
-        {},
+        makeSessionStartPayload(ctx),
       );
 
       expect(aggregate.decision).toBe("approve");
@@ -219,7 +268,7 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       registerHook({
         id: hookId("system/session_start/deny-all"),
@@ -233,14 +282,14 @@ describeOrSkip("runHooks (integration)", () => {
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: null,
           event: HOOK_EVENT.SessionStart,
         },
-        {},
+        makeSessionStartPayload(ctx),
       );
 
       expect(aggregate.decision).toBe("deny");
@@ -262,32 +311,40 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
-      registerHook<{ value: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/modify-payload"),
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { value: p.value + 1 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v + 1 } },
+          });
+        },
       });
 
-      const aggregate = await runHooks<{ value: number }>(
+      const aggregate = await runHooks(
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: "test_tool",
           event: HOOK_EVENT.PreToolUse,
         },
-        { value: 41 },
+        makePreToolPayload(ctx, { v: 41 }),
       );
 
       expect(aggregate.decision).toBe("modify");
-      if (aggregate.decision === "modify") expect(aggregate.payload).toEqual({ value: 42 });
+      if (aggregate.decision === "modify") {
+        expect(aggregate.payload.toolInput["v"]).toBe(42);
+      }
 
       const auditRows = await sql<AuditRow[]>`SELECT id, decision FROM hook_audit`;
       expect(auditRows.length).toBe(1);
@@ -304,7 +361,7 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       registerHook({
         id: hookId("system/session_start/approve-1"),
@@ -325,14 +382,14 @@ describeOrSkip("runHooks (integration)", () => {
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: null,
           event: HOOK_EVENT.SessionStart,
         },
-        {},
+        makeSessionStartPayload(ctx),
       );
 
       expect(aggregate.decision).toBe("approve");
@@ -347,7 +404,7 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       let secondRan = false;
       registerHook({
@@ -372,14 +429,14 @@ describeOrSkip("runHooks (integration)", () => {
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: null,
           event: HOOK_EVENT.SessionStart,
         },
-        {},
+        makeSessionStartPayload(ctx),
       );
 
       expect(aggregate.decision).toBe("deny");
@@ -395,23 +452,35 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/modify-a"),
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 10 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v + 10 } },
+          });
+        },
       });
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/modify-b"),
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 100 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v + 100 } },
+          });
+        },
       });
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/deny-c"),
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
@@ -419,18 +488,18 @@ describeOrSkip("runHooks (integration)", () => {
         decision: () => Promise.resolve({ decision: "deny", reason: "final deny" }),
       });
 
-      const aggregate = await runHooks<{ v: number }>(
+      const aggregate = await runHooks(
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: "test_tool",
           event: HOOK_EVENT.PreToolUse,
         },
-        { v: 1 },
+        makePreToolPayload(ctx, { v: 1 }),
       );
 
       expect(aggregate.decision).toBe("deny");
@@ -447,47 +516,61 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/modify-1"),
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 1 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v + 1 } },
+          });
+        },
       });
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/approve-mid"),
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
         decision: () => Promise.resolve({ decision: "approve" }),
       });
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/modify-2"),
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v * 10 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v * 10 } },
+          });
+        },
       });
 
-      const aggregate = await runHooks<{ v: number }>(
+      const aggregate = await runHooks(
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: "test_tool",
           event: HOOK_EVENT.PreToolUse,
         },
-        { v: 5 },
+        makePreToolPayload(ctx, { v: 5 }),
       );
 
       // Rule 1: v=5 → modify → v=6. Rule 2: approve (no change). Rule 3: v=6 → modify → v=60.
       expect(aggregate.decision).toBe("modify");
-      if (aggregate.decision === "modify") expect(aggregate.payload).toEqual({ v: 60 });
+      if (aggregate.decision === "modify") {
+        expect(aggregate.payload.toolInput["v"]).toBe(60);
+      }
 
       const rows = await sql`SELECT id FROM hook_audit`;
       expect(rows.length).toBe(3);
@@ -500,7 +583,7 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       registerHook({
         id: hookId("system/session_start/approve-matched"),
@@ -521,14 +604,14 @@ describeOrSkip("runHooks (integration)", () => {
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: null,
           event: HOOK_EVENT.SessionStart,
         },
-        {},
+        makeSessionStartPayload(ctx),
       );
 
       expect(aggregate.decision).toBe("approve");
@@ -545,7 +628,7 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       let orgRan = false;
       let agentRan = false;
@@ -557,7 +640,7 @@ describeOrSkip("runHooks (integration)", () => {
         matcher: () => true,
         decision: () => Promise.resolve({ decision: "deny", reason: "system blocks" }),
       });
-      registerHook<unknown>({
+      registerHook({
         id: hookId("system/session_start/org-should-not-run"),
         layer: "organization",
         event: HOOK_EVENT.SessionStart,
@@ -567,7 +650,7 @@ describeOrSkip("runHooks (integration)", () => {
         },
         decision: () => Promise.resolve({ decision: "approve" }),
       });
-      registerHook<unknown>({
+      registerHook({
         id: hookId("system/session_start/agent-should-not-run"),
         layer: "agent",
         event: HOOK_EVENT.SessionStart,
@@ -582,14 +665,14 @@ describeOrSkip("runHooks (integration)", () => {
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: null,
           event: HOOK_EVENT.SessionStart,
         },
-        {},
+        makeSessionStartPayload(ctx),
       );
 
       expect(aggregate.decision).toBe("deny");
@@ -611,26 +694,38 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       // System: v += 10
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/sys-modify"),
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 10 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v + 10 } },
+          });
+        },
       });
       // Org: v *= 2 (sees system's modified payload v=11)
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/org-modify"),
         layer: "organization",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v * 2 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v * 2 } },
+          });
+        },
       });
       // Agent: approve (no payload change)
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/agent-approve"),
         layer: "agent",
         event: HOOK_EVENT.PreToolUse,
@@ -638,16 +733,25 @@ describeOrSkip("runHooks (integration)", () => {
         decision: () => Promise.resolve({ decision: "approve" }),
       });
 
-      const aggregate = await runHooks<{ v: number }>(
+      const aggregate = await runHooks(
         sql,
         clock,
-        { tenantId, agentId, sessionId, turnId: null, toolName: "t", event: HOOK_EVENT.PreToolUse },
-        { v: 1 },
+        {
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
+          turnId: null,
+          toolName: "t",
+          event: HOOK_EVENT.PreToolUse,
+        },
+        makePreToolPayload(ctx, { v: 1 }),
       );
 
       // v=1 → system: v=11 → org: v=22 → agent: approve (no change)
       expect(aggregate.decision).toBe("modify");
-      if (aggregate.decision === "modify") expect(aggregate.payload).toEqual({ v: 22 });
+      if (aggregate.decision === "modify") {
+        expect(aggregate.payload.toolInput["v"]).toBe(22);
+      }
 
       const auditRows = await sql<
         AuditRow[]
@@ -668,7 +772,7 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       let agentRan = false;
 
@@ -679,14 +783,14 @@ describeOrSkip("runHooks (integration)", () => {
         matcher: () => true,
         decision: () => Promise.resolve({ decision: "approve" }),
       });
-      registerHook<unknown>({
+      registerHook({
         id: hookId("system/session_start/org-deny"),
         layer: "organization",
         event: HOOK_EVENT.SessionStart,
         matcher: () => true,
         decision: () => Promise.resolve({ decision: "deny", reason: "org policy" }),
       });
-      registerHook<unknown>({
+      registerHook({
         id: hookId("system/session_start/agent-should-not-run"),
         layer: "agent",
         event: HOOK_EVENT.SessionStart,
@@ -701,14 +805,14 @@ describeOrSkip("runHooks (integration)", () => {
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: null,
           event: HOOK_EVENT.SessionStart,
         },
-        {},
+        makeSessionStartPayload(ctx),
       );
 
       expect(aggregate.decision).toBe("deny");
@@ -737,10 +841,10 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
       // System bucket is empty — only org rule
-      registerHook<unknown>({
+      registerHook({
         id: hookId("system/session_start/org-approve"),
         layer: "organization",
         event: HOOK_EVENT.SessionStart,
@@ -752,14 +856,14 @@ describeOrSkip("runHooks (integration)", () => {
         sql,
         clock,
         {
-          tenantId,
-          agentId,
-          sessionId,
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
           turnId: null,
           toolName: null,
           event: HOOK_EVENT.SessionStart,
         },
-        {},
+        makeSessionStartPayload(ctx),
       );
 
       expect(aggregate.decision).toBe("approve");
@@ -775,33 +879,54 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/sys-mod"),
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 5 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v + 5 } },
+          });
+        },
       });
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/agent-mod"),
         layer: "agent",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 100 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v + 100 } },
+          });
+        },
       });
 
-      const aggregate = await runHooks<{ v: number }>(
+      const aggregate = await runHooks(
         sql,
         clock,
-        { tenantId, agentId, sessionId, turnId: null, toolName: "t", event: HOOK_EVENT.PreToolUse },
-        { v: 0 },
+        {
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
+          turnId: null,
+          toolName: "t",
+          event: HOOK_EVENT.PreToolUse,
+        },
+        makePreToolPayload(ctx, { v: 0 }),
       );
 
       // v=0 → system: v=5 → agent: v=105. Chain is left-to-right, agent's modify is final.
       expect(aggregate.decision).toBe("modify");
-      if (aggregate.decision === "modify") expect(aggregate.payload).toEqual({ v: 105 });
+      if (aggregate.decision === "modify") {
+        expect(aggregate.payload.toolInput["v"]).toBe(105);
+      }
     },
     HOOK_TIMEOUT_MS,
   );
@@ -811,46 +936,119 @@ describeOrSkip("runHooks (integration)", () => {
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(1_000_000);
-      const { agentId, tenantId, sessionId } = await setup(sql);
+      const ctx = await setup(sql);
 
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/sys"),
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 1 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v + 1 } },
+          });
+        },
       });
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/org"),
         layer: "organization",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 10 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v + 10 } },
+          });
+        },
       });
-      registerHook<{ v: number }>({
+      registerHook({
         id: hookId("system/pre_tool_use/agt"),
         layer: "agent",
         event: HOOK_EVENT.PreToolUse,
         matcher: () => true,
-        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 100 } }),
+        decision: (p) => {
+          const v = p.toolInput["v"] as number;
+          return Promise.resolve({
+            decision: "modify",
+            payload: { ...p, toolInput: { v: v + 100 } },
+          });
+        },
       });
 
-      const aggregate = await runHooks<{ v: number }>(
+      const aggregate = await runHooks(
         sql,
         clock,
-        { tenantId, agentId, sessionId, turnId: null, toolName: "t", event: HOOK_EVENT.PreToolUse },
-        { v: 0 },
+        {
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
+          turnId: null,
+          toolName: "t",
+          event: HOOK_EVENT.PreToolUse,
+        },
+        makePreToolPayload(ctx, { v: 0 }),
       );
 
       // v=0 → sys: v=1 → org: v=11 → agent: v=111
       expect(aggregate.decision).toBe("modify");
-      if (aggregate.decision === "modify") expect(aggregate.payload).toEqual({ v: 111 });
+      if (aggregate.decision === "modify") {
+        expect(aggregate.payload.toolInput["v"]).toBe(111);
+      }
 
       const auditRows = await sql<AuditRow[]>`SELECT layer FROM hook_audit ORDER BY created_at`;
       expect(auditRows.length).toBe(3);
       expect(auditRows[0]?.layer).toBe("system");
       expect(auditRows[1]?.layer).toBe("organization");
       expect(auditRows[2]?.layer).toBe("agent");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "session_end hook: approve hook fires, audit row written, close still happens",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_000_000);
+      const ctx = await setup(sql);
+
+      registerHook({
+        id: hookId("system/session_end/audit-check"),
+        layer: "system",
+        event: HOOK_EVENT.SessionEnd,
+        matcher: () => true,
+        decision: () => Promise.resolve({ decision: "approve" }),
+      });
+
+      const aggregate = await runHooks(
+        sql,
+        clock,
+        {
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
+          turnId: null,
+          toolName: null,
+          event: HOOK_EVENT.SessionEnd,
+        },
+        {
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
+          reason: { kind: "end_turn" },
+          closedAt: new Date(2_000_000),
+          createdAt: new Date(1_000_000),
+          durationMs: 1_000_000,
+        },
+      );
+
+      expect(aggregate.decision).toBe("approve");
+      const auditRows = await sql<AuditRow[]>`SELECT id, decision, layer FROM hook_audit`;
+      expect(auditRows.length).toBe(1);
+      expect(auditRows[0]?.decision).toBe("approve");
+      expect(auditRows[0]?.layer).toBe("system");
     },
     HOOK_TIMEOUT_MS,
   );

@@ -18,7 +18,7 @@ import type { ToolRegistry, ToolResult } from "../../../src/session/tools.ts";
 import { runTurnLoop } from "../../../src/session/turn-loop.ts";
 import type { Message, ModelResponse, TextBlock, ToolUseBlock } from "../../../src/session/turn.ts";
 import { InMemoryToolRegistry, echoTool } from "../../../src/session/tools-inmemory.ts";
-import type { PostToolUsePayload, PreToolUsePayload } from "../../../src/hook/types.ts";
+import type { PostToolUsePayload, PreToolUsePayload } from "../../../src/hook/payloads.ts";
 import { HOOK_EVENT } from "../../../src/hook/types.ts";
 import { __clearRegistryForTesting, registerHook } from "../../../src/hook/registry.ts";
 import { HookRecordId } from "../../../src/ids.ts";
@@ -493,7 +493,7 @@ describe("hook registry — call order and payloads", () => {
   test("pre hook fires before tool invoke, post hook fires after (ordered log)", async () => {
     const log: string[] = [];
 
-    registerHook<PreToolUsePayload>({
+    registerHook({
       id: makeHookId("system/pre_tool_use/test-order"),
       layer: "system",
       event: HOOK_EVENT.PreToolUse,
@@ -503,7 +503,7 @@ describe("hook registry — call order and payloads", () => {
         return Promise.resolve({ decision: "approve" });
       },
     });
-    registerHook<PostToolUsePayload>({
+    registerHook({
       id: makeHookId("system/post_tool_use/test-order"),
       layer: "system",
       event: HOOK_EVENT.PostToolUse,
@@ -543,7 +543,7 @@ describe("hook registry — call order and payloads", () => {
   test("pre_tool_use hook receives correct payload fields", async () => {
     const captured: PreToolUsePayload[] = [];
 
-    registerHook<PreToolUsePayload>({
+    registerHook({
       id: makeHookId("system/pre_tool_use/capture-payload"),
       layer: "system",
       event: HOOK_EVENT.PreToolUse,
@@ -586,7 +586,7 @@ describe("hook registry — call order and payloads", () => {
   test("post_tool_use hook receives correct payload fields including outcome=invoked", async () => {
     const captured: PostToolUsePayload[] = [];
 
-    registerHook<PostToolUsePayload>({
+    registerHook({
       id: makeHookId("system/post_tool_use/capture-payload"),
       layer: "system",
       event: HOOK_EVENT.PostToolUse,
@@ -627,7 +627,7 @@ describe("hook registry — call order and payloads", () => {
   test("post_tool_use outcome=tool_error when tool returns error", async () => {
     const captured: PostToolUsePayload[] = [];
 
-    registerHook<PostToolUsePayload>({
+    registerHook({
       id: makeHookId("system/post_tool_use/capture-outcome"),
       layer: "system",
       event: HOOK_EVENT.PostToolUse,
@@ -680,14 +680,14 @@ describe("hook registry — relay.hook.evaluation_total counter", () => {
     ids = makeIds();
     sql = makeFakeSql(ids.tenantId);
     // Register one approve hook per event so evaluateHook is called and emits the counter.
-    registerHook<PreToolUsePayload>({
+    registerHook({
       id: makeHookId("system/pre_tool_use/counter-approve"),
       layer: "system",
       event: HOOK_EVENT.PreToolUse,
       matcher: () => true,
       decision: () => Promise.resolve({ decision: "approve" }),
     });
-    registerHook<PostToolUsePayload>({
+    registerHook({
       id: makeHookId("system/post_tool_use/counter-approve"),
       layer: "system",
       event: HOOK_EVENT.PostToolUse,
