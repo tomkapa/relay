@@ -9,11 +9,12 @@ import { migrate } from "../../../src/db/migrate-apply.ts";
 import { insertHookAudit } from "../../../src/hook/audit.ts";
 import type { InsertHookAuditInput } from "../../../src/hook/audit.ts";
 import { MAX_DENY_REASON_CHARS } from "../../../src/hook/limits.ts";
-import { AgentId, HookAuditId, SessionId, TenantId } from "../../../src/ids.ts";
+import { AgentId, HookAuditId, SessionId, TenantId, TurnId } from "../../../src/ids.ts";
 import type {
   AgentId as AgentIdType,
   SessionId as SessionIdType,
   TenantId as TenantIdType,
+  TurnId as TurnIdType,
 } from "../../../src/ids.ts";
 import {
   DB_URL,
@@ -159,12 +160,15 @@ describeOrSkip("insertHookAudit (integration)", () => {
       await insertSession(sql, sessionRaw, agentRaw, tenantRaw);
       const agentId = parseAgent(agentRaw);
       const tenantId = parseTenant(tenantRaw);
+      const turnIdResult = TurnId.parse(turnRaw);
+      assert(turnIdResult.ok, "fixture: invalid TurnId");
+      const turnId: TurnIdType = turnIdResult.value;
 
       const result = await insertHookAudit(sql, {
         ...baseInput(agentId, tenantId),
         event: "pre_tool_use",
         sessionId: parseSession(sessionRaw),
-        turnId: turnRaw,
+        turnId,
         toolName: "bash",
       });
 

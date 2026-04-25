@@ -13,6 +13,7 @@ import {
   type HookAuditId as HookAuditIdBrand,
   type SessionId,
   type TenantId as TenantIdBrand,
+  type TurnId,
 } from "../ids.ts";
 import { MAX_DENY_REASON_CHARS } from "./limits.ts";
 import type { HookEvent, HookLayer } from "./types.ts";
@@ -29,7 +30,7 @@ export type InsertHookAuditInput = {
   readonly tenantId: TenantIdBrand;
   readonly sessionId: SessionId | null;
   readonly agentId: AgentId;
-  readonly turnId: string | null;
+  readonly turnId: TurnId | null;
   readonly toolName: string | null;
 };
 
@@ -45,7 +46,7 @@ export type HookAuditRow = {
   readonly tenantId: TenantIdBrand;
   readonly sessionId: string | null;
   readonly agentId: AgentId;
-  readonly turnId: string | null;
+  readonly turnId: TurnId | null;
   readonly toolName: string | null;
   readonly createdAt: Date;
 };
@@ -88,7 +89,7 @@ function toDomain(row: AuditDbRow): HookAuditRow {
     tenantId: row.tenant_id as TenantIdBrand,
     sessionId: row.session_id,
     agentId: row.agent_id as AgentId,
-    turnId: row.turn_id,
+    turnId: row.turn_id as TurnId | null,
     toolName: row.tool_name,
     createdAt: row.created_at,
   };
