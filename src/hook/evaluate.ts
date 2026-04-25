@@ -77,7 +77,11 @@ export async function evaluateHook(
 
       // session_end fires after the session is already closed — no next turn will drain
       // a pending message, so skip the enqueue for this observational event.
-      if (decision.decision === "deny" && input.sessionId !== null && input.event !== "session_end") {
+      if (
+        decision.decision === "deny" &&
+        input.sessionId !== null &&
+        input.event !== "session_end"
+      ) {
         const enqueueResult = await enqueuePendingSystemMessage(tx, {
           tenantId: input.tenantId,
           targetSessionId: input.sessionId,
