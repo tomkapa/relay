@@ -2,10 +2,10 @@
 // Uses typed arrow consts (no declared params) so the linter stays quiet — same pattern as
 // hookStub / preMessageReceiveStub in trigger/handlers.ts.
 
-import type { HookResult, PostToolUsePayload, PreToolUsePayload } from "./types.ts";
+import type { HookDecision, PostToolUsePayload, PreToolUsePayload } from "./types.ts";
 
-export const preToolUseStub: (payload: PreToolUsePayload) => Promise<HookResult> = () =>
+export const preToolUseStub: (payload: PreToolUsePayload) => Promise<HookDecision> = () =>
   Promise.resolve({ decision: "approve" });
 
-export const postToolUseStub: (payload: PostToolUsePayload) => Promise<HookResult> = () =>
+export const postToolUseStub: (payload: PostToolUsePayload) => Promise<HookDecision> = () =>
   Promise.resolve({ decision: "approve" });

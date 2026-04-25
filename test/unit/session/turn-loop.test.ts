@@ -18,7 +18,11 @@ import type { ToolRegistry, ToolResult } from "../../../src/session/tools.ts";
 import { runTurnLoop } from "../../../src/session/turn-loop.ts";
 import type { Message, ModelResponse, TextBlock, ToolUseBlock } from "../../../src/session/turn.ts";
 import { InMemoryToolRegistry, echoTool } from "../../../src/session/tools-inmemory.ts";
-import type { HookResult, PostToolUsePayload, PreToolUsePayload } from "../../../src/hook/types.ts";
+import type {
+  HookDecision,
+  PostToolUsePayload,
+  PreToolUsePayload,
+} from "../../../src/hook/types.ts";
 import {
   installMetricFixture,
   uninstallMetricFixture,
@@ -469,7 +473,7 @@ describe("saturation counters — tool dispatch", () => {
   });
 });
 
-const approveStub: (p: PreToolUsePayload | PostToolUsePayload) => Promise<HookResult> = () =>
+const approveStub: (p: PreToolUsePayload | PostToolUsePayload) => Promise<HookDecision> = () =>
   Promise.resolve({ decision: "approve" });
 
 describe("hook seams — call order and payloads", () => {
@@ -482,11 +486,11 @@ describe("hook seams — call order and payloads", () => {
   test("preToolUse called before invoke, postToolUse called after (ordered log)", async () => {
     const log: string[] = [];
 
-    const preStub: (p: PreToolUsePayload) => Promise<HookResult> = () => {
+    const preStub: (p: PreToolUsePayload) => Promise<HookDecision> = () => {
       log.push("pre");
       return Promise.resolve({ decision: "approve" });
     };
-    const postStub: (p: PostToolUsePayload) => Promise<HookResult> = () => {
+    const postStub: (p: PostToolUsePayload) => Promise<HookDecision> = () => {
       log.push("post");
       return Promise.resolve({ decision: "approve" });
     };
@@ -527,7 +531,7 @@ describe("hook seams — call order and payloads", () => {
   test("preToolUse receives correct payload fields", async () => {
     const captured: PreToolUsePayload[] = [];
 
-    const preStub = (p: PreToolUsePayload): Promise<HookResult> => {
+    const preStub = (p: PreToolUsePayload): Promise<HookDecision> => {
       captured.push(p);
       return Promise.resolve({ decision: "approve" });
     };
@@ -571,7 +575,7 @@ describe("hook seams — call order and payloads", () => {
   test("postToolUse receives correct payload fields including outcome=invoked", async () => {
     const captured: PostToolUsePayload[] = [];
 
-    const postStub = (p: PostToolUsePayload): Promise<HookResult> => {
+    const postStub = (p: PostToolUsePayload): Promise<HookDecision> => {
       captured.push(p);
       return Promise.resolve({ decision: "approve" });
     };
@@ -612,7 +616,7 @@ describe("hook seams — call order and payloads", () => {
 
   test("postToolUse outcome=tool_error when tool returns error", async () => {
     const captured: PostToolUsePayload[] = [];
-    const postStub = (p: PostToolUsePayload): Promise<HookResult> => {
+    const postStub = (p: PostToolUsePayload): Promise<HookDecision> => {
       captured.push(p);
       return Promise.resolve({ decision: "approve" });
     };
