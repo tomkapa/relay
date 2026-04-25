@@ -79,6 +79,7 @@ type AuditRow = {
   decision: string;
   reason: string | null;
   hook_id: string;
+  layer: string;
   matcher_result: boolean;
 };
 type PendingRow = { id: string; content: string; hook_audit_id: string };
@@ -533,6 +534,323 @@ describeOrSkip("runHooks (integration)", () => {
       expect(aggregate.decision).toBe("approve");
       const rows = await sql`SELECT id FROM hook_audit`;
       expect(rows.length).toBe(1);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  // ---- Cross-layer composition tests (RELAY-139) --------------------------------
+
+  test(
+    "cross-layer deny: system denies → org and agent rules never run",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_000_000);
+      const { agentId, tenantId, sessionId } = await setup(sql);
+
+      let orgRan = false;
+      let agentRan = false;
+
+      registerHook({
+        id: hookId("system/session_start/sys-deny"),
+        layer: "system",
+        event: HOOK_EVENT.SessionStart,
+        matcher: () => true,
+        decision: () => Promise.resolve({ decision: "deny", reason: "system blocks" }),
+      });
+      registerHook<unknown>({
+        id: hookId("system/session_start/org-should-not-run"),
+        layer: "organization",
+        event: HOOK_EVENT.SessionStart,
+        matcher: () => {
+          orgRan = true;
+          return true;
+        },
+        decision: () => Promise.resolve({ decision: "approve" }),
+      });
+      registerHook<unknown>({
+        id: hookId("system/session_start/agent-should-not-run"),
+        layer: "agent",
+        event: HOOK_EVENT.SessionStart,
+        matcher: () => {
+          agentRan = true;
+          return true;
+        },
+        decision: () => Promise.resolve({ decision: "approve" }),
+      });
+
+      const aggregate = await runHooks(
+        sql,
+        clock,
+        {
+          tenantId,
+          agentId,
+          sessionId,
+          turnId: null,
+          toolName: null,
+          event: HOOK_EVENT.SessionStart,
+        },
+        {},
+      );
+
+      expect(aggregate.decision).toBe("deny");
+      if (aggregate.decision === "deny") expect(aggregate.reason).toBe("system blocks");
+      expect(orgRan).toBe(false);
+      expect(agentRan).toBe(false);
+
+      // Only 1 audit row — system deny row; org/agent produce nothing
+      const auditRows = await sql<AuditRow[]>`SELECT id, layer, decision FROM hook_audit`;
+      expect(auditRows.length).toBe(1);
+      expect(auditRows[0]?.layer).toBe("system");
+      expect(auditRows[0]?.decision).toBe("deny");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "cross-layer modify chain: system modify → org modify → agent approve, payload threads",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_000_000);
+      const { agentId, tenantId, sessionId } = await setup(sql);
+
+      // System: v += 10
+      registerHook<{ v: number }>({
+        id: hookId("system/pre_tool_use/sys-modify"),
+        layer: "system",
+        event: HOOK_EVENT.PreToolUse,
+        matcher: () => true,
+        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 10 } }),
+      });
+      // Org: v *= 2 (sees system's modified payload v=11)
+      registerHook<{ v: number }>({
+        id: hookId("system/pre_tool_use/org-modify"),
+        layer: "organization",
+        event: HOOK_EVENT.PreToolUse,
+        matcher: () => true,
+        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v * 2 } }),
+      });
+      // Agent: approve (no payload change)
+      registerHook<{ v: number }>({
+        id: hookId("system/pre_tool_use/agent-approve"),
+        layer: "agent",
+        event: HOOK_EVENT.PreToolUse,
+        matcher: () => true,
+        decision: () => Promise.resolve({ decision: "approve" }),
+      });
+
+      const aggregate = await runHooks<{ v: number }>(
+        sql,
+        clock,
+        { tenantId, agentId, sessionId, turnId: null, toolName: "t", event: HOOK_EVENT.PreToolUse },
+        { v: 1 },
+      );
+
+      // v=1 → system: v=11 → org: v=22 → agent: approve (no change)
+      expect(aggregate.decision).toBe("modify");
+      if (aggregate.decision === "modify") expect(aggregate.payload).toEqual({ v: 22 });
+
+      const auditRows = await sql<
+        AuditRow[]
+      >`SELECT layer, decision FROM hook_audit ORDER BY created_at`;
+      expect(auditRows.length).toBe(3);
+      expect(auditRows[0]?.layer).toBe("system");
+      expect(auditRows[0]?.decision).toBe("modify");
+      expect(auditRows[1]?.layer).toBe("organization");
+      expect(auditRows[1]?.decision).toBe("modify");
+      expect(auditRows[2]?.layer).toBe("agent");
+      expect(auditRows[2]?.decision).toBe("approve");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "cross-layer: system approve → org deny → agent never runs",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_000_000);
+      const { agentId, tenantId, sessionId } = await setup(sql);
+
+      let agentRan = false;
+
+      registerHook({
+        id: hookId("system/session_start/sys-approve"),
+        layer: "system",
+        event: HOOK_EVENT.SessionStart,
+        matcher: () => true,
+        decision: () => Promise.resolve({ decision: "approve" }),
+      });
+      registerHook<unknown>({
+        id: hookId("system/session_start/org-deny"),
+        layer: "organization",
+        event: HOOK_EVENT.SessionStart,
+        matcher: () => true,
+        decision: () => Promise.resolve({ decision: "deny", reason: "org policy" }),
+      });
+      registerHook<unknown>({
+        id: hookId("system/session_start/agent-should-not-run"),
+        layer: "agent",
+        event: HOOK_EVENT.SessionStart,
+        matcher: () => {
+          agentRan = true;
+          return true;
+        },
+        decision: () => Promise.resolve({ decision: "approve" }),
+      });
+
+      const aggregate = await runHooks(
+        sql,
+        clock,
+        {
+          tenantId,
+          agentId,
+          sessionId,
+          turnId: null,
+          toolName: null,
+          event: HOOK_EVENT.SessionStart,
+        },
+        {},
+      );
+
+      expect(aggregate.decision).toBe("deny");
+      if (aggregate.decision === "deny") expect(aggregate.reason).toBe("org policy");
+      expect(agentRan).toBe(false);
+
+      // 2 audit rows: system approve + org deny
+      const auditRows = await sql<
+        AuditRow[]
+      >`SELECT layer, decision FROM hook_audit ORDER BY created_at`;
+      expect(auditRows.length).toBe(2);
+      expect(auditRows[0]?.layer).toBe("system");
+      expect(auditRows[0]?.decision).toBe("approve");
+      expect(auditRows[1]?.layer).toBe("organization");
+      expect(auditRows[1]?.decision).toBe("deny");
+
+      // Pending message written for org-layer deny
+      const pendingRows = await sql<PendingRow[]>`SELECT id FROM pending_system_messages`;
+      expect(pendingRows.length).toBe(1);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "cross-layer: empty system + non-empty org: org rules run, system denial impossible",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_000_000);
+      const { agentId, tenantId, sessionId } = await setup(sql);
+
+      // System bucket is empty — only org rule
+      registerHook<unknown>({
+        id: hookId("system/session_start/org-approve"),
+        layer: "organization",
+        event: HOOK_EVENT.SessionStart,
+        matcher: () => true,
+        decision: () => Promise.resolve({ decision: "approve" }),
+      });
+
+      const aggregate = await runHooks(
+        sql,
+        clock,
+        {
+          tenantId,
+          agentId,
+          sessionId,
+          turnId: null,
+          toolName: null,
+          event: HOOK_EVENT.SessionStart,
+        },
+        {},
+      );
+
+      expect(aggregate.decision).toBe("approve");
+      const auditRows = await sql<AuditRow[]>`SELECT layer, decision FROM hook_audit`;
+      expect(auditRows.length).toBe(1);
+      expect(auditRows[0]?.layer).toBe("organization");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "cross-layer modify: agent modify is final aggregate even when system also modified",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_000_000);
+      const { agentId, tenantId, sessionId } = await setup(sql);
+
+      registerHook<{ v: number }>({
+        id: hookId("system/pre_tool_use/sys-mod"),
+        layer: "system",
+        event: HOOK_EVENT.PreToolUse,
+        matcher: () => true,
+        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 5 } }),
+      });
+      registerHook<{ v: number }>({
+        id: hookId("system/pre_tool_use/agent-mod"),
+        layer: "agent",
+        event: HOOK_EVENT.PreToolUse,
+        matcher: () => true,
+        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 100 } }),
+      });
+
+      const aggregate = await runHooks<{ v: number }>(
+        sql,
+        clock,
+        { tenantId, agentId, sessionId, turnId: null, toolName: "t", event: HOOK_EVENT.PreToolUse },
+        { v: 0 },
+      );
+
+      // v=0 → system: v=5 → agent: v=105. Chain is left-to-right, agent's modify is final.
+      expect(aggregate.decision).toBe("modify");
+      if (aggregate.decision === "modify") expect(aggregate.payload).toEqual({ v: 105 });
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "all three layers modify: payload threads all the way through",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_000_000);
+      const { agentId, tenantId, sessionId } = await setup(sql);
+
+      registerHook<{ v: number }>({
+        id: hookId("system/pre_tool_use/sys"),
+        layer: "system",
+        event: HOOK_EVENT.PreToolUse,
+        matcher: () => true,
+        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 1 } }),
+      });
+      registerHook<{ v: number }>({
+        id: hookId("system/pre_tool_use/org"),
+        layer: "organization",
+        event: HOOK_EVENT.PreToolUse,
+        matcher: () => true,
+        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 10 } }),
+      });
+      registerHook<{ v: number }>({
+        id: hookId("system/pre_tool_use/agt"),
+        layer: "agent",
+        event: HOOK_EVENT.PreToolUse,
+        matcher: () => true,
+        decision: (p) => Promise.resolve({ decision: "modify", payload: { v: p.v + 100 } }),
+      });
+
+      const aggregate = await runHooks<{ v: number }>(
+        sql,
+        clock,
+        { tenantId, agentId, sessionId, turnId: null, toolName: "t", event: HOOK_EVENT.PreToolUse },
+        { v: 0 },
+      );
+
+      // v=0 → sys: v=1 → org: v=11 → agent: v=111
+      expect(aggregate.decision).toBe("modify");
+      if (aggregate.decision === "modify") expect(aggregate.payload).toEqual({ v: 111 });
+
+      const auditRows = await sql<AuditRow[]>`SELECT layer FROM hook_audit ORDER BY created_at`;
+      expect(auditRows.length).toBe(3);
+      expect(auditRows[0]?.layer).toBe("system");
+      expect(auditRows[1]?.layer).toBe("organization");
+      expect(auditRows[2]?.layer).toBe("agent");
     },
     HOOK_TIMEOUT_MS,
   );

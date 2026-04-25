@@ -10,8 +10,9 @@ export const DEPTH_CAP = 32;
 export const RATE_CAP_SESSIONS_PER_WINDOW = 200;
 export const RATE_CAP_WINDOW_MS = 60 * 1000;
 
-// Max hooks evaluated per lifecycle event across all three layers (system + org + agent).
-// Composition is all-matching (SPEC.md §Composition), so we still need a ceiling.
+// Max hooks per (layer, event) bucket. Cap is per-bucket — 64 system + 64 org + 64 agent
+// = 192 max rules per event across all three layers. Composition is all-matching
+// (SPEC.md §Composition), so we still need a ceiling per bucket.
 export const MAX_HOOKS_PER_EVENT = 64;
 
 // Per-hook evaluation budget. CEL predicates are fast; this guards against pathological inputs.
