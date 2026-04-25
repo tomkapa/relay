@@ -165,12 +165,17 @@ async function tryRetrieveMemoryContext(
   return retrieveResult.value;
 }
 
+export type OpeningContext = {
+  readonly entries: readonly TranscriptEntry[];
+  readonly userText: string;
+};
+
 export async function synthesizeOpeningContext(
   deps: SynthesizeDeps,
   payload: TriggerPayload,
   agent: SynthesisAgent,
   signal: AbortSignal,
-): Promise<readonly TranscriptEntry[]> {
+): Promise<OpeningContext> {
   const { entries, userText } = buildBaseEntries(payload, agent.systemPrompt);
 
   return withSpan(
@@ -181,7 +186,7 @@ export async function synthesizeOpeningContext(
 
       if (memories.length === 0) {
         span.setAttribute(Attr.MemoryInjectedCount, 0);
-        return entries;
+        return { entries, userText };
       }
 
       const now = new Date(deps.clock.now());
@@ -205,7 +210,7 @@ export async function synthesizeOpeningContext(
       ).record(memories.length);
       span.setAttribute(Attr.MemoryInjectedCount, memories.length);
 
-      return [{ role: "system", content }, entries[1]];
+      return { entries: [{ role: "system", content }, entries[1]], userText };
     },
   );
 }

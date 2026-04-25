@@ -45,8 +45,8 @@ export async function insertSession(
 ): Promise<void> {
   const chainId = randomUUID();
   await s`
-    INSERT INTO sessions (id, agent_id, tenant_id, originating_trigger, chain_id, depth, created_at, updated_at)
-    VALUES (${sessionId}, ${agentId}, ${tenantId}, '{"kind":"test"}'::jsonb, ${chainId}, 0, now(), now())
+    INSERT INTO sessions (id, agent_id, tenant_id, originating_trigger, chain_id, depth, opening_user_content, created_at, updated_at)
+    VALUES (${sessionId}, ${agentId}, ${tenantId}, '{"kind":"test"}'::jsonb, ${chainId}, 0, 'test opening content', now(), now())
   `;
 }
 

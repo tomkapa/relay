@@ -23,7 +23,7 @@ import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from
 import type { WorkItem } from "../../../src/work_queue/queue.ts";
 import { MAX_ENVELOPE_BYTES } from "../../../src/trigger/limits.ts";
 import type { ModelClient } from "../../../src/session/model.ts";
-import type { ModelResponse } from "../../../src/session/turn.ts";
+import type { Message, ModelResponse } from "../../../src/session/turn.ts";
 import { InMemoryToolRegistry } from "../../../src/session/tools-inmemory.ts";
 import { FakeEmbeddingClient } from "../../fakes/embedding-fake.ts";
 
@@ -93,6 +93,7 @@ async function insertOpenSession(
   sql: Sql,
   tenantId: ReturnType<typeof tenant>,
   agentId: AgentId,
+  openingUserContent = "Original question",
 ): Promise<SessionId> {
   const sessionIdStr = randomUUID();
   const chainId = randomUUID();
@@ -100,17 +101,40 @@ async function insertOpenSession(
   await sql`
     INSERT INTO sessions (
       id, agent_id, tenant_id, originating_trigger,
-      parent_session_id, chain_id, depth
+      parent_session_id, chain_id, depth, opening_user_content
     )
     VALUES (
       ${sessionIdStr}, ${agentId}, ${tenantId},
       ${trigger},
-      NULL, ${chainId}, 0
+      NULL, ${chainId}, 0, ${openingUserContent}
     )
   `;
   const r = SessionIdParser.parse(sessionIdStr);
   assert(r.ok, "fixture: randomUUID produced invalid SessionId");
   return r.value;
+}
+
+async function insertTurnRow(
+  sql: Sql,
+  sessionId: SessionId,
+  agentId: AgentId,
+  tenantId: ReturnType<typeof tenant>,
+  turnIndex: number,
+  responseText: string,
+): Promise<void> {
+  const turnId = randomUUID();
+  const response = sql.json({
+    content: [{ type: "text", text: responseText }],
+    stopReason: "end_turn",
+    usage: { inputTokens: 5, outputTokens: 3 },
+  });
+  const toolResults = sql.json([]);
+  const usage = sql.json({ inputTokens: 5, outputTokens: 3 });
+  const now = new Date();
+  await sql`
+    INSERT INTO turns (id, session_id, tenant_id, agent_id, turn_index, started_at, completed_at, response, tool_results, usage)
+    VALUES (${turnId}, ${sessionId}, ${tenantId}, ${agentId}, ${turnIndex}, ${now}, ${now}, ${response}, ${toolResults}, ${usage})
+  `;
 }
 
 function endTurnModel(): ModelClient {
@@ -878,6 +902,139 @@ describeOrSkip("inbound_message handler — error cases", () => {
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error.kind).toBe("handler_failed");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+});
+
+describeOrSkip("inbound_message handler — resume turn loop wiring", () => {
+  test(
+    "happy path: prior turn reloaded, inbound appended, session closed after end_turn",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_700_000_000_000);
+      const tenantId = tenant();
+      const agentId = await insertAgent(sql, tenantId, "Agent system prompt");
+      const sessionId = await insertOpenSession(sql, tenantId, agentId, "Original question");
+
+      await insertTurnRow(sql, sessionId, agentId, tenantId, 0, "First reply");
+
+      const widResult = WorkItemId.parse(randomUUID());
+      assert(widResult.ok, "fixture: WorkItemId.parse failed");
+      const inboundResult = await writeInboundMessage(sql, {
+        tenantId,
+        targetSessionId: sessionId,
+        sender: { type: "human", id: "user-1" },
+        content: "Follow-up question",
+        receivedAt: new Date(clock.now()),
+        sourceWorkItemId: widResult.value,
+      });
+      assert(inboundResult.ok, "fixture: writeInboundMessage failed");
+
+      const capturedCalls: { messages: readonly Message[] }[] = [];
+      const recordingModel: ModelClient = {
+        complete({ messages }) {
+          capturedCalls.push({ messages: [...messages] }); // snapshot — runTurnLoop mutates the array after the call
+          return Promise.resolve({
+            content: [{ type: "text", text: "Resume reply" }],
+            stopReason: "end_turn",
+            usage: { inputTokens: 10, outputTokens: 5 },
+          });
+        },
+      };
+
+      const workItem: WorkItem = {
+        id: widResult.value,
+        tenantId,
+        kind: "inbound_message",
+        payloadRef: inboundResult.value,
+        scheduledAt: new Date(clock.now()),
+        traceparent: null,
+        attempts: 1,
+      };
+
+      const result = await triggerHandlers(fakeDeps(sql, clock, recordingModel)).inbound_message(
+        workItem,
+        new AbortController().signal,
+      );
+      expect(result.ok).toBe(true);
+
+      const sessions = await sql<{ closed_at: Date | null }[]>`
+        SELECT closed_at FROM sessions WHERE id = ${sessionId}
+      `;
+      expect(sessions[0]?.closed_at).not.toBeNull();
+
+      const turns = await sql<{ turn_index: number }[]>`
+        SELECT turn_index FROM turns WHERE session_id = ${sessionId} ORDER BY turn_index
+      `;
+      expect(turns).toHaveLength(2);
+      expect(turns[1]?.turn_index).toBe(1);
+
+      assert(capturedCalls.length >= 1, "recording model was called at least once");
+      const capturedMessages = capturedCalls[0]?.messages;
+      assert(capturedMessages !== undefined, "captured messages must exist");
+      expect(capturedMessages).toHaveLength(3);
+      const msg0 = capturedMessages[0];
+      const msg1 = capturedMessages[1];
+      const msg2 = capturedMessages[2];
+      expect(msg0?.role).toBe("user");
+      expect(msg1?.role).toBe("assistant");
+      expect(msg2?.role).toBe("user");
+      const firstBlock = msg0?.role === "user" ? msg0.content[0] : undefined;
+      expect(firstBlock?.type === "text" ? firstBlock.text : undefined).toBe("Original question");
+      const lastBlock = msg2?.role === "user" ? msg2.content[0] : undefined;
+      expect(lastBlock?.type === "text" ? lastBlock.text : undefined).toBe("Follow-up question");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "model_call_failed → handler_failed, session stays open",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_700_000_000_000);
+      const tenantId = tenant();
+      const agentId = await insertAgent(sql, tenantId);
+      const sessionId = await insertOpenSession(sql, tenantId, agentId);
+
+      const widResult = WorkItemId.parse(randomUUID());
+      assert(widResult.ok, "fixture: WorkItemId.parse failed");
+      const inboundResult = await writeInboundMessage(sql, {
+        tenantId,
+        targetSessionId: sessionId,
+        sender: { type: "human", id: "u" },
+        content: "Trigger failure",
+        receivedAt: new Date(clock.now()),
+        sourceWorkItemId: widResult.value,
+      });
+      assert(inboundResult.ok, "fixture: writeInboundMessage failed");
+
+      const failModel: ModelClient = {
+        complete: () => Promise.reject(new Error("model unavailable")),
+      };
+
+      const workItem: WorkItem = {
+        id: widResult.value,
+        tenantId,
+        kind: "inbound_message",
+        payloadRef: inboundResult.value,
+        scheduledAt: new Date(clock.now()),
+        traceparent: null,
+        attempts: 1,
+      };
+
+      const result = await triggerHandlers(fakeDeps(sql, clock, failModel)).inbound_message(
+        workItem,
+        new AbortController().signal,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.kind).toBe("handler_failed");
+
+      const sessions = await sql<{ closed_at: Date | null }[]>`
+        SELECT closed_at FROM sessions WHERE id = ${sessionId}
+      `;
+      expect(sessions[0]?.closed_at).toBeNull();
     },
     HOOK_TIMEOUT_MS,
   );
