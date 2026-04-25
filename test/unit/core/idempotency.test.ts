@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { AssertionError } from "../../../src/core/assert.ts";
-import { assertValidKeyFormat, idempotencyKey } from "../../../src/core/idempotency.ts";
-import { SessionId, TurnId } from "../../../src/ids.ts";
+import {
+  assertValidKeyFormat,
+  idempotencyKey,
+  idempotencyKeyForAgentSeed,
+} from "../../../src/core/idempotency.ts";
+import { AgentId, SessionId, TurnId, type AgentId as AgentIdBrand } from "../../../src/ids.ts";
 
 function sid(): SessionId {
   const r = SessionId.parse(randomUUID());
@@ -64,6 +68,45 @@ describe("idempotencyKey", () => {
 
   test("idempotencyKey_producesHexDigest: output is 64 lowercase hex chars", () => {
     expect(idempotencyKey(BASE)).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("idempotencyKeyForAgentSeed", () => {
+  function aid(): AgentIdBrand {
+    const r = AgentId.parse(randomUUID());
+    if (!r.ok) throw new Error("fixture: invalid AgentId");
+    return r.value;
+  }
+
+  const AGENT_ID = aid();
+
+  test("deterministic: same agentId and index produce same key", () => {
+    const a = idempotencyKeyForAgentSeed({ agentId: AGENT_ID, index: 0 });
+    const b = idempotencyKeyForAgentSeed({ agentId: AGENT_ID, index: 0 });
+    expect(a).toBe(b);
+  });
+
+  test("different agentId produces different key", () => {
+    const a = idempotencyKeyForAgentSeed({ agentId: AGENT_ID, index: 0 });
+    const b = idempotencyKeyForAgentSeed({ agentId: aid(), index: 0 });
+    expect(a).not.toBe(b);
+  });
+
+  test("different index produces different key", () => {
+    const a = idempotencyKeyForAgentSeed({ agentId: AGENT_ID, index: 0 });
+    const b = idempotencyKeyForAgentSeed({ agentId: AGENT_ID, index: 1 });
+    expect(a).not.toBe(b);
+  });
+
+  test("output is a 64-char lowercase hex digest", () => {
+    const key = idempotencyKeyForAgentSeed({ agentId: AGENT_ID, index: 0 });
+    expect(key).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("negative index throws AssertionError", () => {
+    expect(() => idempotencyKeyForAgentSeed({ agentId: AGENT_ID, index: -1 })).toThrow(
+      AssertionError,
+    );
   });
 });
 

@@ -20,7 +20,8 @@ export type HookEvent =
   | "pre_tool_use"
   | "post_tool_use"
   | "pre_message_receive"
-  | "pre_message_send";
+  | "pre_message_send"
+  | "agent_create";
 
 // Named constants for HookEvent values. `as const satisfies` preserves the literal type so
 // generic E is correctly inferred from HOOK_EVENT.SessionStart rather than widened to HookEvent.
@@ -32,6 +33,7 @@ export const HOOK_EVENT = Object.freeze({
   PostToolUse: "post_tool_use",
   PreMessageReceive: "pre_message_receive",
   PreMessageSend: "pre_message_send",
+  AgentCreate: "agent_create",
 } as const satisfies Record<string, HookEvent>);
 
 // Synchronous predicate over a typed payload. Exported for call sites that name the type explicitly.

@@ -13,6 +13,7 @@ import { makeApp } from "../../../src/http/app.ts";
 import { MAX_REQUEST_BYTES } from "../../../src/http/limits.ts";
 import { makeReplyRegistry } from "../../../src/http/reply-registry.ts";
 import { MAX_SYSTEM_PROMPT_LEN } from "../../../src/agent/limits.ts";
+import { FakeEmbeddingClient } from "../../fakes/embedding-fake.ts";
 import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
 
 let sqlRef: Sql | undefined;
@@ -58,6 +59,7 @@ beforeAll(async () => {
     sql: s,
     clock: new FakeClock(1_700_000_000_000),
     registry: makeReplyRegistry(new FakeClock(1_700_000_000_000)),
+    embedder: new FakeEmbeddingClient(),
   });
 }, HOOK_TIMEOUT_MS);
 

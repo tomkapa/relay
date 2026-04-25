@@ -28,14 +28,15 @@ describe("HOOK_EVENT", () => {
     expect(HOOK_EVENT.SessionStart).toBe("session_start");
   });
 
-  test("all six lifecycle events are present", () => {
+  test("all seven lifecycle events are present", () => {
     expect(HOOK_EVENT.SessionStart).toBe("session_start");
     expect(HOOK_EVENT.SessionEnd).toBe("session_end");
     expect(HOOK_EVENT.PreToolUse).toBe("pre_tool_use");
     expect(HOOK_EVENT.PostToolUse).toBe("post_tool_use");
     expect(HOOK_EVENT.PreMessageReceive).toBe("pre_message_receive");
     expect(HOOK_EVENT.PreMessageSend).toBe("pre_message_send");
-    expect(Object.keys(HOOK_EVENT)).toHaveLength(6);
+    expect(HOOK_EVENT.AgentCreate).toBe("agent_create");
+    expect(Object.keys(HOOK_EVENT)).toHaveLength(7);
   });
 
   test("constant is frozen", () => {

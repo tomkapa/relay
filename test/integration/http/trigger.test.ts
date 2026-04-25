@@ -11,6 +11,7 @@ import { migrate } from "../../../src/db/migrate-apply.ts";
 import { makeApp } from "../../../src/http/app.ts";
 import { makeReplyRegistry } from "../../../src/http/reply-registry.ts";
 import { startSyncListener } from "../../../src/http/sync-listener.ts";
+import { FakeEmbeddingClient } from "../../fakes/embedding-fake.ts";
 import {
   AgentId as AgentIdParser,
   SessionId as SessionIdParser,
@@ -133,7 +134,7 @@ beforeAll(async () => {
   const registry = makeReplyRegistry(appClock);
   const { stop } = await startSyncListener(s, registry);
   stopListenerRef = stop;
-  appRef = makeApp({ sql: s, clock: appClock, registry });
+  appRef = makeApp({ sql: s, clock: appClock, registry, embedder: new FakeEmbeddingClient() });
 }, HOOK_TIMEOUT_MS);
 
 afterAll(async () => {

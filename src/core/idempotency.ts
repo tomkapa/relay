@@ -1,7 +1,7 @@
 import { assert } from "./assert.ts";
 import type { Brand } from "./brand.ts";
 import { sha256Hex } from "./hash.ts";
-import type { SessionId, TurnId } from "../ids.ts";
+import type { AgentId, SessionId, TurnId } from "../ids.ts";
 
 export type IdempotencyKey = Brand<string, "IdempotencyKey">;
 
@@ -33,4 +33,17 @@ export function idempotencyKey(input: IdempotencyKeyInput): IdempotencyKey {
 
 export function assertValidKeyFormat(key: string): asserts key is IdempotencyKey {
   assert(KEY_DIGEST_RE.test(key), "idempotency: key not 64-hex digest", { keyLength: key.length });
+}
+
+// Deterministic idempotency key for a seed memory at agent creation. The freshly-minted
+// agentId makes the digest unique per creation; index disambiguates entries within one batch.
+// Reuses the same 64-hex IdempotencyKey brand — no new format.
+export function idempotencyKeyForAgentSeed(input: {
+  readonly agentId: AgentId;
+  readonly index: number;
+}): IdempotencyKey {
+  assert(input.index >= 0, "idempotencyKeyForAgentSeed: index must be non-negative", {
+    index: input.index,
+  });
+  return sha256Hex(`agent.seed_memory|${input.agentId}|${String(input.index)}`) as IdempotencyKey;
 }

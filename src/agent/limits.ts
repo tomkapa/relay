@@ -20,3 +20,7 @@ export const MAX_HOOK_RULE_BYTES = 4_096;
 // Name field caps within each tool descriptor / hook rule entry (characters).
 export const MAX_TOOL_NAME_LEN = 128;
 export const MAX_HOOK_RULE_NAME_LEN = 128;
+
+// Max seed memories injected at agent creation. Pessimistic — agents needing > 16 bootstrap
+// facts should use a separate batch import path rather than blocking the creation transaction.
+export const MAX_SEED_MEMORIES = 16;

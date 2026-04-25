@@ -7,6 +7,7 @@ import { shutdownTelemetry } from "../telemetry/setup.ts";
 import { assert } from "../core/assert.ts";
 import { realClock } from "../core/clock.ts";
 import { connect } from "../db/client.ts";
+import { OpenAIEmbeddingClient } from "../memory/embedding-openai.ts";
 import { makeApp } from "./app.ts";
 import { DEFAULT_PORT, PORT_MAX, PORT_MIN } from "./limits.ts";
 import { makeReplyRegistry } from "./reply-registry.ts";
@@ -14,6 +15,12 @@ import { startSyncListener } from "./sync-listener.ts";
 
 const DATABASE_URL = process.env["DATABASE_URL"];
 assert(DATABASE_URL !== undefined && DATABASE_URL.length > 0, "server: DATABASE_URL must be set");
+
+const OPENAI_API_KEY = process.env["OPENAI_API_KEY"];
+assert(
+  OPENAI_API_KEY !== undefined && OPENAI_API_KEY.length > 0,
+  "server: OPENAI_API_KEY must be set",
+);
 
 const portStr = process.env["PORT"] ?? String(DEFAULT_PORT);
 const portNum = Number(portStr);
@@ -25,7 +32,8 @@ assert(
 
 const sql = connect({ url: DATABASE_URL, applicationName: "relay-http" });
 const registry = makeReplyRegistry(realClock);
-const app = makeApp({ sql, clock: realClock, registry });
+const embedder = new OpenAIEmbeddingClient({ apiKey: OPENAI_API_KEY });
+const app = makeApp({ sql, clock: realClock, registry, embedder });
 
 // Wire LISTEN before serving — ensures no request races the listener setup.
 const syncListener = await startSyncListener(sql, registry);
