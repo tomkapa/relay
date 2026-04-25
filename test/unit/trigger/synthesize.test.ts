@@ -86,7 +86,7 @@ describe("synthesizeOpeningContext — system entry", () => {
       agent,
       makeDefaultSignal(),
     );
-    expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
+    expect(ctx.entries[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 
   test("entry[0] is always the system prompt for event kind", async () => {
@@ -96,7 +96,7 @@ describe("synthesizeOpeningContext — system entry", () => {
       agent,
       makeDefaultSignal(),
     );
-    expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
+    expect(ctx.entries[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 
   test("entry[0] is always the system prompt for task_fire kind", async () => {
@@ -106,7 +106,7 @@ describe("synthesizeOpeningContext — system entry", () => {
       agent,
       makeDefaultSignal(),
     );
-    expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
+    expect(ctx.entries[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 });
 
@@ -118,7 +118,7 @@ describe("synthesizeOpeningContext — message payload", () => {
       agent,
       makeDefaultSignal(),
     );
-    const user = ctx[1];
+    const user = ctx.entries[1];
     expect(user?.role).toBe("user");
     if (user?.role !== "user") return;
     expect(user.sender).toEqual({ type: "human", id: "user-1", displayName: "Alice" });
@@ -131,7 +131,7 @@ describe("synthesizeOpeningContext — message payload", () => {
       agent,
       makeDefaultSignal(),
     );
-    const user = ctx[1];
+    const user = ctx.entries[1];
     if (user?.role !== "user") return;
     expect(user.receivedAt).toBe("2026-04-22T00:00:00.000Z");
   });
@@ -140,7 +140,7 @@ describe("synthesizeOpeningContext — message payload", () => {
     const longContent = "x".repeat(MAX_OPENING_USER_CONTENT + 100);
     const payload: TriggerPayload = { ...messagePayload, content: longContent };
     const ctx = await synthesizeOpeningContext(defaultDeps(), payload, agent, makeDefaultSignal());
-    const user = ctx[1];
+    const user = ctx.entries[1];
     if (user?.role !== "user") return;
     expect(user.content.length).toBeLessThanOrEqual(MAX_OPENING_USER_CONTENT);
     expect(user.content).toContain("[…truncated]");
@@ -150,9 +150,21 @@ describe("synthesizeOpeningContext — message payload", () => {
     const exactContent = "x".repeat(MAX_OPENING_USER_CONTENT);
     const payload: TriggerPayload = { ...messagePayload, content: exactContent };
     const ctx = await synthesizeOpeningContext(defaultDeps(), payload, agent, makeDefaultSignal());
-    const user = ctx[1];
+    const user = ctx.entries[1];
     if (user?.role !== "user") return;
     expect(user.content).toBe(exactContent);
+  });
+
+  test("userText matches entries[1].content for message payload", async () => {
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      messagePayload,
+      agent,
+      makeDefaultSignal(),
+    );
+    const user = ctx.entries[1];
+    if (user?.role !== "user") return;
+    expect(ctx.userText).toBe(user.content);
   });
 });
 
@@ -164,7 +176,7 @@ describe("synthesizeOpeningContext — event payload", () => {
       agent,
       makeDefaultSignal(),
     );
-    const user = ctx[1];
+    const user = ctx.entries[1];
     if (user?.role !== "user") return;
     expect(user.content).toContain("github");
   });
@@ -182,7 +194,7 @@ describe("synthesizeOpeningContext — event payload", () => {
       agent,
       makeDefaultSignal(),
     );
-    expect(ctx1[1]).toEqual(ctx2[1]);
+    expect(ctx1.entries[1]).toEqual(ctx2.entries[1]);
   });
 });
 
@@ -194,7 +206,7 @@ describe("synthesizeOpeningContext — task_fire payload", () => {
       agent,
       makeDefaultSignal(),
     );
-    const user = ctx[1];
+    const user = ctx.entries[1];
     if (user?.role !== "user") return;
     expect(user.content).toContain("2026-04-22T10:00:00.000Z");
     expect(user.content).toContain("Run weekly digest");
@@ -207,7 +219,7 @@ describe("synthesizeOpeningContext — task_fire payload", () => {
       agent,
       makeDefaultSignal(),
     );
-    const user = ctx[1];
+    const user = ctx.entries[1];
     if (user?.role !== "user") return;
     const isoCount = (user.content.match(/2026-04-22T10:00:00\.000Z/g) ?? []).length;
     const intentCount = (user.content.match(/Run weekly digest/g) ?? []).length;
@@ -218,21 +230,33 @@ describe("synthesizeOpeningContext — task_fire payload", () => {
 
 describe("synthesizeOpeningContext — always 2 entries", () => {
   test("returns exactly 2 entries for message", async () => {
-    expect(
-      await synthesizeOpeningContext(defaultDeps(), messagePayload, agent, makeDefaultSignal()),
-    ).toHaveLength(2);
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      messagePayload,
+      agent,
+      makeDefaultSignal(),
+    );
+    expect(ctx.entries).toHaveLength(2);
   });
 
   test("returns exactly 2 entries for event", async () => {
-    expect(
-      await synthesizeOpeningContext(defaultDeps(), eventPayload, agent, makeDefaultSignal()),
-    ).toHaveLength(2);
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      eventPayload,
+      agent,
+      makeDefaultSignal(),
+    );
+    expect(ctx.entries).toHaveLength(2);
   });
 
   test("returns exactly 2 entries for task_fire", async () => {
-    expect(
-      await synthesizeOpeningContext(defaultDeps(), taskPayload, agent, makeDefaultSignal()),
-    ).toHaveLength(2);
+    const ctx = await synthesizeOpeningContext(
+      defaultDeps(),
+      taskPayload,
+      agent,
+      makeDefaultSignal(),
+    );
+    expect(ctx.entries).toHaveLength(2);
   });
 });
 
@@ -240,8 +264,8 @@ describe("synthesizeOpeningContext — embed soft-fail paths", () => {
   test("synthesize_returnsBaseTuple_whenEmbedFails_transient", async () => {
     const deps = defaultDeps(); // transient error
     const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, makeDefaultSignal());
-    expect(ctx).toHaveLength(2);
-    expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
+    expect(ctx.entries).toHaveLength(2);
+    expect(ctx.entries[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 
   test("synthesize_returnsBaseTuple_whenEmbedFails_permanent", async () => {
@@ -251,8 +275,8 @@ describe("synthesizeOpeningContext — embed soft-fail paths", () => {
       embedder: new FakeEmbeddingClient({ error: { kind: "permanent", message: "banned" } }),
     };
     const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, makeDefaultSignal());
-    expect(ctx).toHaveLength(2);
-    expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
+    expect(ctx.entries).toHaveLength(2);
+    expect(ctx.entries[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 
   test("synthesize_returnsBaseTuple_whenEmbedFails_timeout", async () => {
@@ -262,8 +286,8 @@ describe("synthesizeOpeningContext — embed soft-fail paths", () => {
       embedder: new FakeEmbeddingClient({ error: { kind: "timeout", elapsedMs: 100 } }),
     };
     const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, makeDefaultSignal());
-    expect(ctx).toHaveLength(2);
-    expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
+    expect(ctx.entries).toHaveLength(2);
+    expect(ctx.entries[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 
   test("synthesize_returnsBaseTuple_whenEmbedFails_inputTooLong", async () => {
@@ -275,8 +299,8 @@ describe("synthesizeOpeningContext — embed soft-fail paths", () => {
       }),
     };
     const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, makeDefaultSignal());
-    expect(ctx).toHaveLength(2);
-    expect(ctx[0]).toEqual({ role: "system", content: agent.systemPrompt });
+    expect(ctx.entries).toHaveLength(2);
+    expect(ctx.entries[0]).toEqual({ role: "system", content: agent.systemPrompt });
   });
 });
 
@@ -284,15 +308,16 @@ describe("synthesizeOpeningContext — embedsExactUserMessageContent", () => {
   test("synthesize_embedsExactUserMessageContent_message", async () => {
     const { deps, captured } = makeCaptureDeps();
     const ctx = await synthesizeOpeningContext(deps, messagePayload, agent, makeDefaultSignal());
-    const user = ctx[1];
+    const user = ctx.entries[1];
     if (user?.role !== "user") return;
     expect(captured.text).toBe(user.content);
+    expect(ctx.userText).toBe(user.content);
   });
 
   test("synthesize_embedsExactUserMessageContent_event", async () => {
     const { deps, captured } = makeCaptureDeps();
     const ctx = await synthesizeOpeningContext(deps, eventPayload, agent, makeDefaultSignal());
-    const user = ctx[1];
+    const user = ctx.entries[1];
     if (user?.role !== "user") return;
     expect(captured.text).toBe(user.content);
   });
@@ -300,7 +325,7 @@ describe("synthesizeOpeningContext — embedsExactUserMessageContent", () => {
   test("synthesize_embedsExactUserMessageContent_taskFire", async () => {
     const { deps, captured } = makeCaptureDeps();
     const ctx = await synthesizeOpeningContext(deps, taskPayload, agent, makeDefaultSignal());
-    const user = ctx[1];
+    const user = ctx.entries[1];
     if (user?.role !== "user") return;
     expect(captured.text).toBe(user.content);
   });

@@ -26,6 +26,8 @@ import { parseEnvelopePayload, parseTaskRow } from "./payload.ts";
 import type { TaskRow, TriggerPayloadError } from "./payload.ts";
 import { synthesizeOpeningContext } from "./synthesize.ts";
 import { createSession } from "../session/create.ts";
+import { loadResumeInput } from "../session/load-resume.ts";
+import type { ResumeInputError } from "../session/load-resume.ts";
 import type { SessionCreateError } from "../session/create.ts";
 import { readInboundMessage } from "./inbound/inbound-ops.ts";
 import type { InboundOpsError } from "./inbound/inbound-ops.ts";
@@ -198,12 +200,11 @@ async function runLoopAndClose(
   session: { readonly id: SessionIdBrand },
   agentId: AgentIdBrand,
   systemPrompt: string,
-  context: readonly TranscriptEntry[],
+  initialMessages: readonly Message[],
 ): Promise<Result<void, HandlerError>> {
-  const loopInput = openingContextToLoopInput(context, systemPrompt);
   const loopResult = await runTurnLoop(
     { sql: deps.sql, clock: deps.clock, model: deps.model, tools: deps.tools },
-    { sessionId: session.id, agentId, tenantId: item.tenantId, ...loopInput },
+    { sessionId: session.id, agentId, tenantId: item.tenantId, systemPrompt, initialMessages },
   );
   const termination = classifyLoopResult(loopResult);
   if (termination.kind === "retry") {
@@ -227,7 +228,7 @@ async function runLoopAndClose(
     [Attr.TurnLoopOutcome]: termination.reason.kind,
   });
   const turnCount = loopResult.ok ? loopResult.value.turns.length : 0;
-  emit("INFO", "trigger.session_start.turn_complete", {
+  emit("INFO", `trigger.${item.kind}.turn_complete`, {
     [Attr.TenantId]: item.tenantId,
     [Attr.SessionId]: session.id,
     [Attr.WorkId]: item.id,
@@ -332,9 +333,12 @@ async function handleSessionStart(
         agentResult.value,
         synthSignal,
       );
-      const context0 = context[0];
-      assert(context0 !== undefined, "handleSessionStart: context[0] must exist");
-      assert(context0.role === "system", "handleSessionStart: context[0] must be system entry");
+      const context0 = context.entries[0];
+      assert(context0 !== undefined, "handleSessionStart: context.entries[0] must exist");
+      assert(
+        context0.role === "system",
+        "handleSessionStart: context.entries[0] must be system entry",
+      );
       const enrichedSystemPrompt = context0.content;
 
       const sessionResult = await createSession(deps.sql, deps.clock, {
@@ -344,8 +348,9 @@ async function handleSessionStart(
         parentSessionId: null,
         chainId,
         depth,
-        openingContext: context,
+        openingContext: context.entries,
         sourceWorkItemId: item.id,
+        openingUserContent: context.userText,
       });
       if (!sessionResult.ok) return err(mapSessionError(sessionResult.error));
 
@@ -354,13 +359,14 @@ async function handleSessionStart(
         return finalizeSession(deps, item, session, payload.targetAgentId, chainId, depth, null);
       }
 
+      const { initialMessages } = openingContextToLoopInput(context.entries, enrichedSystemPrompt);
       const loopResult = await runLoopAndClose(
         deps,
         item,
         session,
         payload.targetAgentId,
         enrichedSystemPrompt,
-        context,
+        initialMessages,
       );
       if (!loopResult.ok) return loopResult;
 
@@ -431,9 +437,9 @@ async function handleTaskFire(
         agentResult.value,
         synthSignal,
       );
-      const context0 = context[0];
-      assert(context0 !== undefined, "handleTaskFire: context[0] must exist");
-      assert(context0.role === "system", "handleTaskFire: context[0] must be system entry");
+      const context0 = context.entries[0];
+      assert(context0 !== undefined, "handleTaskFire: context.entries[0] must exist");
+      assert(context0.role === "system", "handleTaskFire: context.entries[0] must be system entry");
       const enrichedSystemPrompt = context0.content;
 
       const sessionResult = await createSession(deps.sql, deps.clock, {
@@ -448,8 +454,9 @@ async function handleTaskFire(
         parentSessionId: null,
         chainId,
         depth,
-        openingContext: context,
+        openingContext: context.entries,
         sourceWorkItemId: item.id,
+        openingUserContent: context.userText,
       });
       if (!sessionResult.ok) return err(mapSessionError(sessionResult.error));
 
@@ -458,13 +465,14 @@ async function handleTaskFire(
         return finalizeSession(deps, item, session, payload.agentId, chainId, depth, null);
       }
 
+      const { initialMessages } = openingContextToLoopInput(context.entries, enrichedSystemPrompt);
       const loopResult = await runLoopAndClose(
         deps,
         item,
         session,
         payload.agentId,
         enrichedSystemPrompt,
-        context,
+        initialMessages,
       );
       if (!loopResult.ok) return loopResult;
 
@@ -531,6 +539,20 @@ function mapTargetSessionError(e: TargetSessionError): HandlerError {
       };
     case "agent_not_found":
       return { kind: "handler_failed", reason: `agent not found: ${e.id as string}` };
+    default:
+      throw unreachable(e);
+  }
+}
+
+function mapResumeError(e: ResumeInputError): HandlerError {
+  switch (e.kind) {
+    case "session_not_found":
+      return {
+        kind: "handler_failed",
+        reason: `resume: session not found: ${e.sessionId as string}`,
+      };
+    case "tenant_mismatch":
+      return { kind: "handler_failed", reason: "resume: session tenant mismatch" };
     default:
       throw unreachable(e);
   }
@@ -608,6 +630,14 @@ async function handleInboundMessage(
         });
       }
 
+      const resumeResult = await loadResumeInput(deps.sql, {
+        sessionId: payload.targetSessionId,
+        tenantId: item.tenantId,
+        agentSystemPrompt: targetResult.value.agent.systemPrompt,
+        inboundContent: payload.content,
+      });
+      if (!resumeResult.ok) return err(mapResumeError(resumeResult.error));
+
       counter("relay.trigger.inbound_message_delivered_total").add(1, {
         [Attr.TriggerKind]: item.kind,
         [Attr.SenderType]: payload.sender.type,
@@ -619,7 +649,14 @@ async function handleInboundMessage(
         [Attr.WorkId]: item.id,
       });
 
-      return ok(undefined);
+      return runLoopAndClose(
+        deps,
+        item,
+        { id: payload.targetSessionId },
+        targetResult.value.session.agentId,
+        resumeResult.value.systemPrompt,
+        resumeResult.value.initialMessages,
+      );
     },
   );
 }

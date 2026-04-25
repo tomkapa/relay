@@ -1,50 +1,16 @@
 // Read the final completed turn for a session and join text blocks into a single string.
 // Used by POST /trigger to build the synchronous HTTP response body.
 
-import { z } from "zod";
 import type { Sql } from "postgres";
 import { err, ok, type Result } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
 import type { SessionId } from "../ids.ts";
 import type { ModelUsage, StopReason } from "./turn.ts";
+import { ModelResponseSchema } from "./turn-schema.ts";
 
 export type ReadFinalTurnError =
   | { readonly kind: "no_turns"; readonly sessionId: SessionId }
   | { readonly kind: "invalid_turn_response"; readonly detail: string };
-
-const ModelResponseSchema = z.object({
-  content: z.array(
-    z.union([
-      z.object({ type: z.literal("text"), text: z.string() }),
-      z.object({
-        type: z.literal("tool_use"),
-        id: z.string(),
-        name: z.string(),
-        input: z.unknown(),
-      }),
-      z.object({
-        type: z.literal("tool_result"),
-        toolUseId: z.string(),
-        content: z.string(),
-        isError: z.boolean().optional(),
-      }),
-    ]),
-  ),
-  stopReason: z.enum([
-    "end_turn",
-    "tool_use",
-    "max_tokens",
-    "stop_sequence",
-    "pause_turn",
-    "refusal",
-  ]),
-  usage: z.object({
-    inputTokens: z.number().int().min(0),
-    outputTokens: z.number().int().min(0),
-    cacheReadInputTokens: z.number().int().min(0).optional(),
-    cacheCreationInputTokens: z.number().int().min(0).optional(),
-  }),
-});
 
 export async function readFinalTurnResponse(
   sql: Sql,

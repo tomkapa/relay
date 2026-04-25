@@ -176,9 +176,9 @@ describeOrSkip("synthesizeOpeningContext — integration", () => {
       const signal = AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS);
       const ctx = await synthesizeOpeningContext(deps, payload, agent, signal);
 
-      expect(ctx).toHaveLength(2);
+      expect(ctx.entries).toHaveLength(2);
       // No memories → system prompt unchanged
-      expect(ctx[0]?.content).toBe("You are helpful.");
+      expect(ctx.entries[0]?.content).toBe("You are helpful.");
     },
     HOOK_TIMEOUT_MS,
   );
@@ -214,8 +214,8 @@ describeOrSkip("synthesizeOpeningContext — integration", () => {
       const signal = AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS);
       const ctx = await synthesizeOpeningContext(deps, payload, agent, signal);
 
-      expect(ctx).toHaveLength(2);
-      const systemContent = ctx[0]?.content ?? "";
+      expect(ctx.entries).toHaveLength(2);
+      const systemContent = ctx.entries[0]?.content ?? "";
       expect(systemContent).toContain("# Recalled memories");
       expect(systemContent).toContain("Fact A");
       expect(systemContent).toContain("Fact B");
@@ -254,7 +254,7 @@ describeOrSkip("synthesizeOpeningContext — integration", () => {
       const signal = AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS);
       const ctx = await synthesizeOpeningContext(deps, payload, agent, signal);
 
-      const systemContent = ctx[0]?.content ?? "";
+      const systemContent = ctx.entries[0]?.content ?? "";
       // No cross-tenant memories should appear
       expect(systemContent).toBe("You are helpful.");
       expect(systemContent).not.toContain("Cross-tenant fact");
@@ -287,8 +287,8 @@ describeOrSkip("synthesizeOpeningContext — integration", () => {
       const ctx = await synthesizeOpeningContext(deps, payload, agent, signal);
 
       // Soft fail → base tuple returned unchanged
-      expect(ctx[0]?.content).toBe("You are helpful.");
-      expect(ctx).toHaveLength(2);
+      expect(ctx.entries[0]?.content).toBe("You are helpful.");
+      expect(ctx.entries).toHaveLength(2);
 
       const rm = await metricFixture.collect();
       const skipped = sumCounter(rm, "relay.memory.injection.skipped_total", {

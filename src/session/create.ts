@@ -20,6 +20,7 @@ import {
 } from "../ids.ts";
 import { Attr, SpanName, withSpan } from "../telemetry/otel.ts";
 import type { TranscriptEntry } from "./transcript.ts";
+import { MAX_OPENING_USER_CONTENT } from "../trigger/limits.ts";
 
 export type CreateSessionSpec = Readonly<{
   agentId: AgentIdBrand;
@@ -30,6 +31,7 @@ export type CreateSessionSpec = Readonly<{
   depth: Depth;
   openingContext: readonly TranscriptEntry[]; // computed by trigger synthesizer; passed to runTurnLoop (RELAY-8)
   sourceWorkItemId: WorkItemId;
+  openingUserContent: string; // rendered user text persisted for transcript reload on resume
 }>;
 
 export type SessionCreateError =
@@ -77,7 +79,7 @@ async function insertSession(
     INSERT INTO sessions (
       id, agent_id, tenant_id, originating_trigger,
       parent_session_id, chain_id, depth,
-      source_work_item_id,
+      source_work_item_id, opening_user_content,
       created_at, updated_at
     )
     VALUES (
@@ -89,6 +91,7 @@ async function insertSession(
       ${spec.chainId},
       ${spec.depth as number},
       ${spec.sourceWorkItemId},
+      ${spec.openingUserContent},
       ${createdAt},
       ${createdAt}
     )
@@ -120,6 +123,11 @@ export async function createSession(
   clock: Clock,
   spec: CreateSessionSpec,
 ): Promise<Result<{ id: SessionIdBrand; isDuplicate: boolean }, SessionCreateError>> {
+  assert(spec.openingUserContent.length > 0, "createSession: openingUserContent must be non-empty");
+  assert(
+    spec.openingUserContent.length <= MAX_OPENING_USER_CONTENT,
+    "createSession: openingUserContent exceeds cap",
+  );
   const newId = mintId(SessionId.parse, "createSession");
   const createdAt = new Date(clock.now());
 

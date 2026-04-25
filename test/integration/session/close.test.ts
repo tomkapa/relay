@@ -47,8 +47,8 @@ async function insertSession(sql: Sql, agentId: AgentId, tenantId: TenantId): Pr
   const raw = randomUUID();
   const chainId = randomUUID();
   await sql`
-    INSERT INTO sessions (id, agent_id, tenant_id, originating_trigger, chain_id, depth, created_at, updated_at)
-    VALUES (${raw}, ${agentId}, ${tenantId}, '{"kind":"test"}'::jsonb, ${chainId}, 0, now(), now())
+    INSERT INTO sessions (id, agent_id, tenant_id, originating_trigger, chain_id, depth, opening_user_content, created_at, updated_at)
+    VALUES (${raw}, ${agentId}, ${tenantId}, '{"kind":"test"}'::jsonb, ${chainId}, 0, 'test opening content', now(), now())
   `;
   const r = SessionIdParser.parse(raw);
   assert(r.ok, "fixture: randomUUID produced invalid SessionId");
