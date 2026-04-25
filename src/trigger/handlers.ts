@@ -201,10 +201,18 @@ async function runLoopAndClose(
   agentId: AgentIdBrand,
   systemPrompt: string,
   initialMessages: readonly Message[],
+  startTurnIndex = 0,
 ): Promise<Result<void, HandlerError>> {
   const loopResult = await runTurnLoop(
     { sql: deps.sql, clock: deps.clock, model: deps.model, tools: deps.tools },
-    { sessionId: session.id, agentId, tenantId: item.tenantId, systemPrompt, initialMessages },
+    {
+      sessionId: session.id,
+      agentId,
+      tenantId: item.tenantId,
+      systemPrompt,
+      initialMessages,
+      startTurnIndex,
+    },
   );
   const termination = classifyLoopResult(loopResult);
   if (termination.kind === "retry") {
@@ -656,6 +664,7 @@ async function handleInboundMessage(
         targetResult.value.session.agentId,
         resumeResult.value.systemPrompt,
         resumeResult.value.initialMessages,
+        resumeResult.value.startTurnIndex,
       );
     },
   );

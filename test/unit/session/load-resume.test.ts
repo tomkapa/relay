@@ -66,6 +66,7 @@ describe("loadResumeInput — no prior turns", () => {
     expect(msgs[1]?.role).toBe("user");
     const last = msgs[1]?.content[0];
     expect(last?.type === "text" && last.text).toBe("Reply");
+    expect(result.value.startTurnIndex).toBe(0);
   });
 
   test("systemPrompt in result comes from params", async () => {
@@ -100,6 +101,7 @@ describe("loadResumeInput — with prior turns (no tool results)", () => {
     expect(msgs[2]?.role).toBe("user");
     const last = msgs[2]?.content[0];
     expect(last?.type === "text" && last.text).toBe("Follow-up");
+    expect(result.value.startTurnIndex).toBe(1);
   });
 
   test("two turns: 4 messages — opening, assistant, assistant, inbound", async () => {

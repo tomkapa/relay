@@ -16,6 +16,7 @@ const ToolResultsSchema = z.array(ToolResultBlockSchema);
 export type ResumeInput = {
   readonly systemPrompt: string;
   readonly initialMessages: readonly Message[];
+  readonly startTurnIndex: number; // first turn_index runTurnLoop should write
 };
 
 export type ResumeInputError =
@@ -105,5 +106,9 @@ export async function loadResumeInput(
 
   messages.push({ role: "user", content: [{ type: "text", text: params.inboundContent }] });
 
-  return ok({ systemPrompt: params.agentSystemPrompt, initialMessages: messages });
+  return ok({
+    systemPrompt: params.agentSystemPrompt,
+    initialMessages: messages,
+    startTurnIndex: turnRows.length,
+  });
 }

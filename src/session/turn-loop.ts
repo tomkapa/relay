@@ -58,6 +58,7 @@ type LoopInput = {
   readonly tenantId: TenantId;
   readonly systemPrompt: string;
   readonly initialMessages: readonly Message[];
+  readonly startTurnIndex?: number; // first turn_index to write; defaults to 0 for fresh sessions
 };
 
 type OneTurnInput = {
@@ -403,8 +404,15 @@ export async function runTurnLoop(
   assert(input.systemPrompt.length > 0, "runTurnLoop: systemPrompt must be non-empty");
   assert(input.initialMessages.length > 0, "runTurnLoop: initialMessages must be non-empty");
 
-  const cap = deps.maxTurns ?? MAX_TURNS_PER_SESSION;
-  assert(cap > 0 && cap <= MAX_TURNS_PER_SESSION, "runTurnLoop: cap out of valid range", { cap });
+  const startTurnIndex = input.startTurnIndex ?? 0;
+  assert(startTurnIndex >= 0, "runTurnLoop: startTurnIndex must be non-negative", {
+    startTurnIndex,
+  });
+  const rawCap = deps.maxTurns ?? MAX_TURNS_PER_SESSION;
+  assert(rawCap > 0 && rawCap <= MAX_TURNS_PER_SESSION, "runTurnLoop: cap out of valid range", {
+    rawCap,
+  });
+  const cap = Math.max(0, rawCap - startTurnIndex);
 
   const modelTimeoutMs = deps.modelTimeoutMs ?? MODEL_CALL_TIMEOUT_MS;
   const toolTimeoutMs = deps.toolTimeoutMs ?? TOOL_CALL_TIMEOUT_MS;
@@ -464,7 +472,7 @@ export async function runTurnLoop(
     const turnResult = await runOneTurn(
       { model: deps.model, tools: deps.tools, clock: deps.clock, sql: deps.sql },
       {
-        index: i,
+        index: startTurnIndex + i,
         sessionId: input.sessionId,
         agentId: input.agentId,
         tenantId: input.tenantId,
