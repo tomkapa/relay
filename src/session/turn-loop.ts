@@ -38,6 +38,7 @@ import type {
 import type { PostToolUsePayload, PreToolUsePayload } from "../hook/payloads.ts";
 import { HOOK_EVENT } from "../hook/types.ts";
 import { runHooks } from "../hook/run.ts";
+import { snapshotHookConfig, type HookConfigSnapshot } from "../hook/snapshot.ts";
 import { drainPendingSystemMessages } from "../hook/pending.ts";
 import { MAX_PENDING_MESSAGES_PER_TURN } from "../hook/limits.ts";
 
@@ -166,6 +167,7 @@ async function dispatchOneBlock(
   toolCompletions: Counter,
   sql: Sql,
   clock: Clock,
+  hookConfig: HookConfigSnapshot,
 ): Promise<Result<ToolResultBlock, TurnLoopError>> {
   const prePayload: PreToolUsePayload = {
     sessionId: ctx.sessionId,
@@ -179,6 +181,7 @@ async function dispatchOneBlock(
   const preDecision = await runHooks(
     sql,
     clock,
+    hookConfig,
     {
       tenantId: ctx.tenantId,
       agentId: ctx.agentId,
@@ -241,6 +244,7 @@ async function dispatchOneBlock(
   const postDecision = await runHooks(
     sql,
     clock,
+    hookConfig,
     {
       tenantId: ctx.tenantId,
       agentId: ctx.agentId,
@@ -279,6 +283,7 @@ async function dispatchTools(
   timeoutMs: number,
   sql: Sql,
   clock: Clock,
+  hookConfig: HookConfigSnapshot,
 ): Promise<Result<readonly ToolResultBlock[], TurnLoopError>> {
   const toolIterations = counter(
     "relay.tool.dispatch_iteration_total",
@@ -318,6 +323,7 @@ async function dispatchTools(
       toolCompletions,
       sql,
       clock,
+      hookConfig,
     );
     if (!r.ok) return r;
     results.push(r.value);
@@ -348,6 +354,10 @@ async function runOneTurn(
     },
     async () => {
       const startedAt = new Date(deps.clock.now());
+      // Snapshot hook config once per turn. All runHooks calls within this turn read from this
+      // snapshot — mid-turn registry mutations are invisible. SPEC §Hooks: "Hook config pins at
+      // turn start." runTurnLoop does NOT snapshot; each runOneTurn iteration takes its own.
+      const hookConfig = snapshotHookConfig(deps.clock);
 
       const modelResult = await callModel(deps.model, {
         systemPrompt: input.systemPrompt,
@@ -368,6 +378,7 @@ async function runOneTurn(
         input.toolTimeoutMs,
         deps.sql,
         deps.clock,
+        hookConfig,
       );
       if (!toolsResult.ok) return toolsResult;
 

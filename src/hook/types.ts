@@ -65,3 +65,5 @@ export type HookEvaluation<TPayload> =
 
 // Re-export for callers that assemble HookEventPayload directly.
 export type { HookEventPayload };
+// Re-export so callers can import HookConfigSnapshot from types.ts rather than snapshot.ts.
+export type { HookConfigSnapshot } from "./snapshot.ts";

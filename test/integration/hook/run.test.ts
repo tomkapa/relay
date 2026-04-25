@@ -9,6 +9,7 @@ import { FakeClock } from "../../../src/core/clock.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
 import { __clearRegistryForTesting, registerHook } from "../../../src/hook/registry.ts";
 import { runHooks } from "../../../src/hook/run.ts";
+import { snapshotHookConfig } from "../../../src/hook/snapshot.ts";
 import { HOOK_EVENT } from "../../../src/hook/types.ts";
 import type { PreToolUsePayload, SessionStartPayload } from "../../../src/hook/payloads.ts";
 import {
@@ -171,6 +172,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -207,6 +209,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -243,6 +246,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -281,6 +285,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -330,6 +335,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -381,6 +387,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -428,6 +435,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -491,6 +499,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -555,6 +564,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -603,6 +613,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -664,6 +675,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -736,6 +748,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -804,6 +817,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -855,6 +869,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -911,6 +926,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -981,6 +997,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -1025,6 +1042,7 @@ describeOrSkip("runHooks (integration)", () => {
       const aggregate = await runHooks(
         sql,
         clock,
+        snapshotHookConfig(clock),
         {
           tenantId: ctx.tenantId,
           agentId: ctx.agentId,
@@ -1049,6 +1067,119 @@ describeOrSkip("runHooks (integration)", () => {
       expect(auditRows.length).toBe(1);
       expect(auditRows[0]?.decision).toBe("approve");
       expect(auditRows[0]?.layer).toBe("system");
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  // ---- HookConfigSnapshot pinning tests (RELAY-141) ----------------------------
+
+  test(
+    "snapshot taken before hook registration: runHooks sees empty bucket → approve",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_000_000);
+      const ctx = await setup(sql);
+
+      // Take snapshot BEFORE registering any hook
+      const snapshotBeforeReg = snapshotHookConfig(clock);
+
+      registerHook({
+        id: hookId("system/session_start/registered-after-snap"),
+        layer: "system",
+        event: HOOK_EVENT.SessionStart,
+        matcher: () => true,
+        decision: () => Promise.resolve({ decision: "deny", reason: "should not fire" }),
+      });
+
+      // Snapshot sees no rules → approve, no audit row
+      const aggregate = await runHooks(
+        sql,
+        clock,
+        snapshotBeforeReg,
+        {
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
+          turnId: null,
+          toolName: null,
+          event: HOOK_EVENT.SessionStart,
+        },
+        makeSessionStartPayload(ctx),
+      );
+
+      expect(aggregate.decision).toBe("approve");
+      const rows = await sql`SELECT id FROM hook_audit`;
+      expect(rows.length).toBe(0);
+    },
+    HOOK_TIMEOUT_MS,
+  );
+
+  test(
+    "same snapshot used twice: registry mutation between calls does not affect second call",
+    async () => {
+      const sql = requireSql();
+      const clock = new FakeClock(1_000_000);
+      const ctx = await setup(sql);
+
+      registerHook({
+        id: hookId("system/pre_tool_use/original"),
+        layer: "system",
+        event: HOOK_EVENT.PreToolUse,
+        matcher: () => true,
+        decision: () => Promise.resolve({ decision: "approve" }),
+      });
+
+      const snapshot = snapshotHookConfig(clock);
+
+      // First call with snapshot
+      const firstResult = await runHooks(
+        sql,
+        clock,
+        snapshot,
+        {
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
+          turnId: null,
+          toolName: "test_tool",
+          event: HOOK_EVENT.PreToolUse,
+        },
+        makePreToolPayload(ctx),
+      );
+      expect(firstResult.decision).toBe("approve");
+
+      // Mutate registry: clear original hook, register a deny hook
+      __clearRegistryForTesting();
+      registerHook({
+        id: hookId("system/pre_tool_use/deny-replacement"),
+        layer: "system",
+        event: HOOK_EVENT.PreToolUse,
+        matcher: () => true,
+        decision: () => Promise.resolve({ decision: "deny", reason: "post-mutation deny" }),
+      });
+
+      // Second call with SAME snapshot — must still see original (approve) hook, not the replacement
+      const secondResult = await runHooks(
+        sql,
+        clock,
+        snapshot,
+        {
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
+          turnId: null,
+          toolName: "test_tool",
+          event: HOOK_EVENT.PreToolUse,
+        },
+        makePreToolPayload(ctx),
+      );
+      expect(secondResult.decision).toBe("approve");
+
+      // Two audit rows — both used the original (approve) hook
+      const auditRows = await sql<AuditRow[]>`SELECT decision FROM hook_audit ORDER BY created_at`;
+      expect(auditRows.length).toBe(2);
+      expect(auditRows[0]?.decision).toBe("approve");
+      expect(auditRows[1]?.decision).toBe("approve");
     },
     HOOK_TIMEOUT_MS,
   );

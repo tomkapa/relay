@@ -6,6 +6,7 @@ import {
   Depth,
   DEPTH_CAP,
   HookId,
+  HookConfigSnapshotId,
   HookRecordId,
   Importance,
   MemoryId,
@@ -263,6 +264,30 @@ describe("HookRecordId.parse", () => {
     const r = HookRecordId.parse(upper);
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.value as string).toBe(VALID_V4);
+  });
+});
+
+describe("HookConfigSnapshotId.parse", () => {
+  test("accepts UUIDv4", () => {
+    const r = HookConfigSnapshotId.parse(VALID_V4);
+    expect(r.ok).toBe(true);
+  });
+
+  test("accepts UUIDv7", () => {
+    const r = HookConfigSnapshotId.parse(VALID_V7);
+    expect(r.ok).toBe(true);
+  });
+
+  test("rejects empty", () => {
+    const r = HookConfigSnapshotId.parse("");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("empty");
+  });
+
+  test("rejects non-UUID", () => {
+    const r = HookConfigSnapshotId.parse("not-a-uuid");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("malformed");
   });
 });
 

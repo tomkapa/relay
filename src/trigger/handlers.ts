@@ -39,6 +39,7 @@ import type { ModelClient } from "../session/model.ts";
 import type { ToolRegistry } from "../session/tools.ts";
 import { runTurnLoop } from "../session/turn-loop.ts";
 import { runHooks } from "../hook/run.ts";
+import { snapshotHookConfig } from "../hook/snapshot.ts";
 import { HOOK_EVENT } from "../hook/types.ts";
 import type { Message } from "../session/turn.ts";
 import { closeSession } from "../session/close.ts";
@@ -244,9 +245,11 @@ async function finalizeSession(
   depth: DepthBrand,
   parentSessionId: SessionIdBrand | null,
 ): Promise<Result<void, HandlerError>> {
+  const hookConfig = snapshotHookConfig(deps.clock);
   const aggregate = await runHooks(
     deps.sql,
     deps.clock,
+    hookConfig,
     {
       tenantId: item.tenantId,
       agentId,
@@ -575,9 +578,11 @@ async function handleInboundMessage(
       );
       if (!targetResult.ok) return err(mapTargetSessionError(targetResult.error));
 
+      const hookConfig = snapshotHookConfig(deps.clock);
       const aggregate = await runHooks(
         deps.sql,
         deps.clock,
+        hookConfig,
         {
           tenantId: item.tenantId,
           agentId: targetResult.value.session.agentId,
