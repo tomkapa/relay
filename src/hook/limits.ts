@@ -19,3 +19,7 @@ export const HOOK_EVAL_TIMEOUT_MS = 50;
 
 // Max length of the `reason` string surfaced back to the agent on a deny (SPEC.md §Audit).
 export const MAX_DENY_REASON_CHARS = 512;
+
+// Max pending_system_messages drained per turn. Agents accumulating more than this between
+// turns have a structural problem that RELAY-141 (config pinning) should surface.
+export const MAX_PENDING_MESSAGES_PER_TURN = 16;

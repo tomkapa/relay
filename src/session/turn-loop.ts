@@ -6,7 +6,7 @@ import type { Sql } from "postgres";
 import { assert } from "../core/assert.ts";
 import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import type { AgentId, SessionId, TenantId } from "../ids.ts";
+import type { AgentId, PendingSystemMessageId, SessionId, TenantId } from "../ids.ts";
 import { TurnId, mintId } from "../ids.ts";
 import {
   Attr,
@@ -14,6 +14,7 @@ import {
   GenAiEvent,
   SpanName,
   counter,
+  emit,
   histogram,
   withSpan,
   type Attributes,
@@ -34,8 +35,15 @@ import type {
   Turn,
   TurnLoopError,
 } from "./turn.ts";
-import type { HookResult, HookSeams } from "../hook/types.ts";
+import type { HookSeams } from "../hook/types.ts";
 import { preToolUseStub, postToolUseStub } from "../hook/stubs.ts";
+import { evaluateHook } from "../hook/evaluate.ts";
+import { drainPendingSystemMessages } from "../hook/pending.ts";
+import { MAX_PENDING_MESSAGES_PER_TURN } from "../hook/limits.ts";
+
+// Stub hook IDs — TEXT until hook_rules ships (RELAY-138+).
+const HOOK_ID_PRE_TOOL_USE = "system/pre-tool-use/stub";
+const HOOK_ID_POST_TOOL_USE = "system/post-tool-use/stub";
 
 type LoopDeps = {
   readonly sql: Sql;
@@ -154,21 +162,6 @@ async function invokeOneTool(
   );
 }
 
-async function callHookSeam(
-  hookAttrs: Attributes,
-  hookFn: () => Promise<HookResult>,
-  evals: Counter,
-  assertMsg: string,
-): Promise<void> {
-  const result = await withSpan(SpanName.HookEvaluate, hookAttrs, hookFn);
-  evals.add(1, {
-    ...hookAttrs,
-    [Attr.HookDecision]: result.decision,
-    [Attr.HookLayer]: "system",
-  });
-  assert(result.decision === "approve", assertMsg);
-}
-
 async function dispatchOneBlock(
   tools: ToolRegistry,
   block: ToolUseBlock,
@@ -177,20 +170,37 @@ async function dispatchOneBlock(
   hooks: HookSeams,
   toolAttrs: Attributes,
   toolCompletions: Counter,
-  hookEvaluations: Counter,
+  sql: Sql,
+  clock: Clock,
 ): Promise<Result<ToolResultBlock, TurnLoopError>> {
-  await callHookSeam(
-    { ...toolAttrs, [Attr.HookEvent]: "pre_tool_use" },
-    () =>
+  const preDecision = await evaluateHook(sql, clock, {
+    hookId: HOOK_ID_PRE_TOOL_USE,
+    layer: "system",
+    event: "pre_tool_use",
+    matcherResult: true,
+    tenantId: ctx.tenantId,
+    agentId: ctx.agentId,
+    sessionId: ctx.sessionId,
+    turnId: ctx.turnId,
+    toolName: block.name,
+    decide: () =>
       hooks.preToolUse({
         ...ctx,
         toolUseId: block.id,
         toolName: block.name,
         toolInput: block.input,
       }),
-    hookEvaluations,
-    "dispatchTools: pre-tool-use stub must approve — deny arrives with RELAY-138",
-  );
+  });
+
+  if (preDecision.decision === "deny") {
+    // Inline error tool_result per RELAY-135 design; pending message already enqueued.
+    return ok({
+      type: "tool_result",
+      toolUseId: block.id,
+      content: preDecision.reason,
+      isError: true as const,
+    });
+  }
 
   const toolDurationHist = histogram(
     "relay.tool.invocation.duration",
@@ -218,18 +228,34 @@ async function dispatchOneBlock(
     [Attr.Outcome]: toolResult.ok ? "invoked" : "tool_error",
   });
 
-  await callHookSeam(
-    { ...toolAttrs, [Attr.HookEvent]: "post_tool_use" },
-    () =>
+  const postDecision = await evaluateHook(sql, clock, {
+    hookId: HOOK_ID_POST_TOOL_USE,
+    layer: "system",
+    event: "post_tool_use",
+    matcherResult: true,
+    tenantId: ctx.tenantId,
+    agentId: ctx.agentId,
+    sessionId: ctx.sessionId,
+    turnId: ctx.turnId,
+    toolName: block.name,
+    decide: () =>
       hooks.postToolUse({
         ...ctx,
         toolUseId: block.id,
         toolName: block.name,
         outcome: toolResult.ok ? "invoked" : "tool_error",
       }),
-    hookEvaluations,
-    "dispatchTools: post-tool-use stub must approve — deny arrives with RELAY-138",
-  );
+  });
+
+  if (postDecision.decision === "deny") {
+    // Post-tool-use deny: replace tool result with error. Pending message already enqueued.
+    return ok({
+      type: "tool_result",
+      toolUseId: block.id,
+      content: postDecision.reason,
+      isError: true as const,
+    });
+  }
 
   toolCompletions.add(1, { ...toolAttrs, [Attr.Outcome]: "invoked" });
   return ok({
@@ -247,6 +273,8 @@ async function dispatchTools(
   ctx: TurnCtx,
   timeoutMs: number,
   hooks: HookSeams,
+  sql: Sql,
+  clock: Clock,
 ): Promise<Result<readonly ToolResultBlock[], TurnLoopError>> {
   const toolIterations = counter(
     "relay.tool.dispatch_iteration_total",
@@ -255,10 +283,6 @@ async function dispatchTools(
   const toolCompletions = counter(
     "relay.tool.dispatch_completion_total",
     "Per tool_use outcome. relay.outcome ∈ {invoked, tool_unknown, timeout}.",
-  );
-  const hookEvaluations = counter(
-    "relay.hook.evaluation_total",
-    "Hook evaluations per lifecycle event. relay.hook.event ∈ {pre_tool_use, post_tool_use}.",
   );
 
   const available = new Set(toolSchemas.map((s) => s.name));
@@ -289,7 +313,8 @@ async function dispatchTools(
       hooks,
       toolAttrs,
       toolCompletions,
-      hookEvaluations,
+      sql,
+      clock,
     );
     if (!r.ok) return r;
     results.push(r.value);
@@ -299,7 +324,7 @@ async function dispatchTools(
 }
 
 async function runOneTurn(
-  deps: { model: ModelClient; tools: ToolRegistry; clock: Clock; hooks: HookSeams },
+  deps: { model: ModelClient; tools: ToolRegistry; clock: Clock; hooks: HookSeams; sql: Sql },
   input: OneTurnInput,
 ): Promise<Result<Turn, TurnLoopError>> {
   const turnId = mintId(TurnId.parse, "runOneTurn");
@@ -339,6 +364,8 @@ async function runOneTurn(
         ctx,
         input.toolTimeoutMs,
         deps.hooks,
+        deps.sql,
+        deps.clock,
       );
       if (!toolsResult.ok) return toolsResult;
 
@@ -393,8 +420,40 @@ export async function runTurnLoop(
   for (let i = 0; i < cap; i++) {
     turnIterations.add(1, baseAttrs);
 
+    // Drain undrained pending system messages and prepend them to this turn's input.
+    const drainResult = await drainPendingSystemMessages(deps.sql, {
+      targetSessionId: input.sessionId,
+      tenantId: input.tenantId,
+    });
+    assert(drainResult.ok, "runTurnLoop: drain pending messages failed");
+    const drained = drainResult.value;
+    assert(drained.length <= MAX_PENDING_MESSAGES_PER_TURN, "runTurnLoop: drained more than cap", {
+      count: drained.length,
+    });
+
+    const drainedIds: PendingSystemMessageId[] = drained.map((row) => row.id);
+    if (drained.length > 0) {
+      // drained is ordered by created_at; unshift preserves that order in messages.
+      messages.unshift(
+        ...drained.map((row) => ({
+          role: "system_synthetic" as const,
+          content: [{ type: "text" as const, text: row.content }],
+        })),
+      );
+    }
+
+    if (drained.length > 0) {
+      counter("relay.hook.pending_message_drained_total").add(drained.length, {
+        [Attr.TenantId]: input.tenantId,
+      });
+      emit("INFO", "hook.pending_drained", {
+        [Attr.SessionId]: input.sessionId,
+        count: drained.length,
+      });
+    }
+
     const turnResult = await runOneTurn(
-      { model: deps.model, tools: deps.tools, clock: deps.clock, hooks },
+      { model: deps.model, tools: deps.tools, clock: deps.clock, hooks, sql: deps.sql },
       {
         index: i,
         sessionId: input.sessionId,
@@ -423,6 +482,7 @@ export async function runTurnLoop(
       sessionId: input.sessionId,
       tenantId: input.tenantId,
       agentId: input.agentId,
+      drainedPendingIds: drainedIds,
     });
     if (!saved.ok) {
       turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "persist_error" });
