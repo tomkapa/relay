@@ -934,7 +934,7 @@ describeOrSkip("inbound_message handler — resume turn loop wiring", () => {
       const capturedCalls: { messages: readonly Message[] }[] = [];
       const recordingModel: ModelClient = {
         complete({ messages }) {
-          capturedCalls.push({ messages });
+          capturedCalls.push({ messages: [...messages] }); // snapshot — runTurnLoop mutates the array after the call
           return Promise.resolve({
             content: [{ type: "text", text: "Resume reply" }],
             stopReason: "end_turn",
