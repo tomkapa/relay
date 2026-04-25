@@ -1,7 +1,7 @@
-// runHooks orchestrator. Iterates the system-layer bucket for one event, runs each
-// rule through evaluateHookRecord, writes the audit row via evaluateHook for matched
-// rules, and composes within-bucket decisions (deny short-circuits; modify chains
-// payload). RELAY-139 adds cross-layer (system → org → agent) outer loop.
+// runHooks orchestrator. Outer loop iterates LAYER_ORDER (system → organization → agent);
+// inner loop runs each rule in the bucket via evaluateHookRecord + evaluateHook.
+// Cross-layer deny short-circuits the outer loop; modify chains thread one running payload
+// from the first system rule through the last agent rule. RELAY-139.
 
 import type { Sql, TransactionSql } from "postgres";
 import { assert, assertNever } from "../core/assert.ts";
@@ -11,8 +11,8 @@ import { Attr, SpanName, counter, emit, withSpan } from "../telemetry/otel.ts";
 import { evaluateHook } from "./evaluate.ts";
 import { MAX_HOOKS_PER_EVENT } from "./limits.ts";
 import { evaluateHookRecord } from "./record.ts";
-import { getRulesForEvent } from "./registry.ts";
-import type { Hook, HookDecision, HookEvent } from "./types.ts";
+import { LAYER_ORDER, getRulesForEvent } from "./registry.ts";
+import type { Hook, HookDecision, HookEvent, HookLayer } from "./types.ts";
 
 export type AggregateDecision<P> = HookDecision<P>;
 
@@ -31,92 +31,73 @@ export async function runHooks<P>(
   ctx: RunHooksContext,
   initialPayload: P,
 ): Promise<AggregateDecision<P>> {
-  const rules = getRulesForEvent(ctx.event);
-
-  // Fast path: empty bucket → approve with no audit rows or telemetry.
-  // SPEC §Audit: "every matched evaluation writes a row" — zero rules means zero matches.
-  if (rules.length === 0) {
+  // Fast path: all layers empty → approve with no span, no audit rows.
+  // In MVP this is the common path — org/agent are always empty and many events
+  // have no system rules registered.
+  if (LAYER_ORDER.every((layer) => getRulesForEvent(layer, ctx.event).length === 0)) {
     return { decision: "approve" };
   }
-
-  assert(
-    rules.length <= MAX_HOOKS_PER_EVENT,
-    "runHooks: bucket exceeds MAX_HOOKS_PER_EVENT at runtime",
-    { event: ctx.event, count: rules.length, max: MAX_HOOKS_PER_EVENT },
-  );
 
   return withSpan(
     SpanName.HookRun,
     {
       [Attr.HookEvent]: ctx.event,
-      [Attr.HookLayer]: "system",
       [Attr.SessionId]: ctx.sessionId ?? "",
       [Attr.AgentId]: ctx.agentId,
       [Attr.TenantId]: ctx.tenantId,
+      ...(ctx.turnId !== null ? { [Attr.TurnId]: ctx.turnId } : {}),
+      ...(ctx.toolName !== null ? { [Attr.ToolName]: ctx.toolName } : {}),
     },
     async () => {
       let runningPayload: P = initialPayload;
       let aggregate: AggregateDecision<P> = { decision: "approve" };
 
-      outerLoop: for (const rule of rules) {
-        // Cast: registry stores Hook<unknown>; caller's P must match the event type.
-        // RELAY-140 per-event-typed sub-maps will erase this cast.
-        const evalResult = await evaluateHookRecord(rule as unknown as Hook<P>, runningPayload);
+      // Outer loop: SPEC-mandated layer order. Deny anywhere short-circuits all remaining layers.
+      // Modify threads one running payload across all layers — layer boundaries are invisible to
+      // the chain. All matched rules in each layer fire unless a deny stops the bucket early.
+      outer: for (const layer of LAYER_ORDER) {
+        const rules = getRulesForEvent(layer, ctx.event);
 
-        if (!evalResult.matched) {
-          counter("relay.hook.matcher_rejected_total").add(1, {
-            [Attr.HookEvent]: ctx.event,
-            [Attr.HookLayer]: rule.layer,
-            [Attr.HookId]: rule.id,
-            [Attr.TenantId]: ctx.tenantId,
-          });
-          continue;
-        }
+        // Empty bucket — fast path; no audit, no telemetry beyond the wrapping span.
+        // In MVP this is the org/agent path on every call.
+        if (rules.length === 0) continue;
 
-        // Side-effects: audit row + optional pending system message (deny + session).
-        // decide() returns what evaluateHookRecord already computed — the call is purely
-        // for the write path in evaluateHook.
-        await evaluateHook(tx, clock, {
-          hookId: rule.id,
-          layer: rule.layer,
-          event: ctx.event,
-          matcherResult: true,
-          tenantId: ctx.tenantId,
-          agentId: ctx.agentId,
-          sessionId: ctx.sessionId,
-          turnId: ctx.turnId,
-          toolName: ctx.toolName,
-          decide: () => Promise.resolve(evalResult.decision as HookDecision),
-        });
+        assert(
+          rules.length <= MAX_HOOKS_PER_EVENT,
+          "runHooks: bucket exceeds MAX_HOOKS_PER_EVENT at runtime",
+          { layer, event: ctx.event, count: rules.length, max: MAX_HOOKS_PER_EVENT },
+        );
 
-        const d = evalResult.decision;
-        switch (d.decision) {
+        const bucketDecision = await runOneLayer(tx, clock, layer, ctx, rules, runningPayload);
+
+        switch (bucketDecision.decision) {
           case "approve":
             break;
-          case "deny":
-            aggregate = { decision: "deny", reason: d.reason };
-            emit("INFO", "hook.bucket_denied", {
-              [Attr.SessionId]: ctx.sessionId ?? "",
-              [Attr.HookEvent]: ctx.event,
-              [Attr.HookId]: rule.id,
-              [Attr.HookReason]: d.reason,
-            });
-            break outerLoop; // SPEC §Composition: deny short-circuits the bucket
           case "modify":
-            assert(d.payload !== undefined, "runHooks: modify must carry a payload", {
-              hookId: rule.id,
-            });
-            runningPayload = d.payload;
+            runningPayload = bucketDecision.payload;
             aggregate = { decision: "modify", payload: runningPayload };
             break;
+          case "deny":
+            aggregate = { decision: "deny", reason: bucketDecision.reason };
+            counter("relay.hook.cross_layer_short_circuit_total").add(1, {
+              [Attr.HookLayer]: layer,
+              [Attr.HookEvent]: ctx.event,
+              [Attr.TenantId]: ctx.tenantId,
+            });
+            emit("INFO", "hook.bucket_denied", {
+              [Attr.HookEvent]: ctx.event,
+              [Attr.HookLayer]: layer,
+              [Attr.SessionId]: ctx.sessionId ?? "",
+              reason: bucketDecision.reason,
+            });
+            break outer; // SPEC §Composition: deny short-circuits the entire pipeline
           default:
-            assertNever(d, "runHooks: unexpected decision variant");
+            assertNever(bucketDecision, "runHooks: unexpected bucket decision");
         }
       }
 
-      counter("relay.hook.bucket_evaluation_total").add(1, {
+      counter("relay.hook.run_total").add(1, {
         [Attr.HookEvent]: ctx.event,
-        [Attr.HookLayer]: "system",
         [Attr.HookDecision]: aggregate.decision,
         [Attr.TenantId]: ctx.tenantId,
       });
@@ -124,4 +105,68 @@ export async function runHooks<P>(
       return aggregate;
     },
   );
+}
+
+// Per-layer inner loop. Returns the bucket's aggregate decision.
+// Factored from the outer loop so RELAY-141 can swap how `rules` is sourced for
+// org/agent layers (pinned config snapshot) without touching composition logic.
+async function runOneLayer<P>(
+  tx: Sql | TransactionSql,
+  clock: Clock,
+  layer: HookLayer,
+  ctx: RunHooksContext,
+  rules: readonly Hook<unknown>[],
+  initialPayload: P,
+): Promise<HookDecision<P>> {
+  let runningPayload: P = initialPayload;
+  let modified = false;
+
+  for (const rule of rules) {
+    // Cast: registry stores Hook<unknown>; caller's P must match the event type.
+    // RELAY-140 per-event-typed sub-maps will erase this cast.
+    const evalResult = await evaluateHookRecord(rule as unknown as Hook<P>, runningPayload);
+
+    if (!evalResult.matched) {
+      counter("relay.hook.matcher_rejected_total").add(1, {
+        [Attr.HookLayer]: layer,
+        [Attr.HookEvent]: ctx.event,
+        [Attr.HookId]: rule.id,
+        [Attr.TenantId]: ctx.tenantId,
+      });
+      continue; // matcher rejected → no audit row (SPEC §Audit)
+    }
+
+    // Side-effects: audit row + optional pending system message (deny + session known).
+    const decision = await evaluateHook(tx, clock, {
+      hookId: rule.id,
+      layer,
+      event: ctx.event,
+      matcherResult: true,
+      tenantId: ctx.tenantId,
+      agentId: ctx.agentId,
+      sessionId: ctx.sessionId,
+      turnId: ctx.turnId,
+      toolName: ctx.toolName,
+      decide: () => Promise.resolve(evalResult.decision as HookDecision),
+    });
+
+    switch (decision.decision) {
+      case "approve":
+        break;
+      case "deny":
+        return { decision: "deny", reason: decision.reason }; // SPEC §Composition: deny short-circuits the bucket
+      case "modify": {
+        assert(decision.payload !== undefined, "runOneLayer: modify must carry payload", {
+          hookId: rule.id,
+        });
+        runningPayload = (decision as HookDecision<P> & { decision: "modify" }).payload;
+        modified = true;
+        break;
+      }
+      default:
+        assertNever(decision, "runOneLayer: unexpected decision variant");
+    }
+  }
+
+  return modified ? { decision: "modify", payload: runningPayload } : { decision: "approve" };
 }

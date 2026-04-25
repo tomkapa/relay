@@ -65,6 +65,35 @@ export default tseslint.config(
     },
   },
   {
+    files: ["src/**/*.ts"],
+    rules: {
+      // Ban test-only registry helper from production code. Calling it in production
+      // would corrupt the static registry between requests in the same process.
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "./registry.ts",
+              importNames: ["__clearRegistryForTesting"],
+              message: "Test-only helper. Import only in test/ files.",
+            },
+            {
+              name: "../hook/registry.ts",
+              importNames: ["__clearRegistryForTesting"],
+              message: "Test-only helper. Import only in test/ files.",
+            },
+            {
+              name: "../../hook/registry.ts",
+              importNames: ["__clearRegistryForTesting"],
+              message: "Test-only helper. Import only in test/ files.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ["test/**/*.ts"],
     rules: {
       "no-console": "off",
