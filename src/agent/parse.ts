@@ -120,15 +120,13 @@ export function parseAgentCreate(raw: unknown): Result<AgentCreateSpec, AgentPar
         });
       }
       for (const entry of body["seedMemory"] as unknown[]) {
-        if (
-          typeof entry === "object" &&
-          entry !== null &&
-          typeof (entry as Record<string, unknown>)["text"] === "string"
-        ) {
-          const text = (entry as Record<string, unknown>)["text"] as string;
-          const bytes = Buffer.byteLength(text, "utf8");
-          if (bytes > MAX_ENTRY_TEXT_BYTES) {
-            return err({ kind: "seed_memory_text_too_long", bytes, max: MAX_ENTRY_TEXT_BYTES });
+        if (typeof entry === "object" && entry !== null && "text" in entry) {
+          const entryObj = entry as { readonly text: unknown };
+          if (typeof entryObj.text === "string") {
+            const bytes = Buffer.byteLength(entryObj.text, "utf8");
+            if (bytes > MAX_ENTRY_TEXT_BYTES) {
+              return err({ kind: "seed_memory_text_too_long", bytes, max: MAX_ENTRY_TEXT_BYTES });
+            }
           }
         }
       }

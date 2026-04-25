@@ -15,9 +15,9 @@ import { AgentId, mintId, type AgentId as AgentIdBrand } from "../ids.ts";
 import type { EmbedError, EmbeddingClient } from "../memory/embedding.ts";
 import { insertMemory } from "../memory/insert.ts";
 import { MemoryKind } from "../memory/kind.ts";
-import { MAX_SEED_MEMORIES } from "./limits.ts";
+import { EMBEDDING_CALL_TIMEOUT_MS } from "../memory/limits.ts";
 import { Attr, SpanName, withSpan } from "../telemetry/otel.ts";
-import { MAX_SYSTEM_PROMPT_LEN } from "./limits.ts";
+import { MAX_SEED_MEMORIES, MAX_SYSTEM_PROMPT_LEN } from "./limits.ts";
 import { type AgentParseError, type AgentCreateSpec, type SeedMemorySpec } from "./parse.ts";
 
 // Sentinel thrown inside sql.begin to trigger rollback with a hook_denied result. Never exported.
@@ -70,8 +70,8 @@ async function embedSeedMemories(
     { count: seedMemories.length, max: MAX_SEED_MEMORIES },
   );
   const embeddings: Float32Array[] = [];
-  const signal = new AbortController().signal;
   for (const entry of seedMemories) {
+    const signal = AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS);
     const result = await embedder.embed(entry.text, signal);
     if (!result.ok) return err(mapEmbedError(result.error));
     embeddings.push(result.value);
@@ -142,16 +142,16 @@ export async function createAgent(
     { length: spec.systemPrompt.length, max: MAX_SYSTEM_PROMPT_LEN },
   );
 
-  const createdAt = new Date(clock.now());
-  const embeddingsResult = await embedSeedMemories(embedder, spec.seedMemory);
-  if (!embeddingsResult.ok) return embeddingsResult;
-
-  const hookConfig = snapshotHookConfig(clock);
-
   return withSpan(
     SpanName.AgentCreate,
     { [Attr.TenantId]: spec.tenantId, [Attr.AgentId]: id },
     async () => {
+      const createdAt = new Date(clock.now());
+      const embeddingsResult = await embedSeedMemories(embedder, spec.seedMemory);
+      if (!embeddingsResult.ok) return embeddingsResult;
+
+      const hookConfig = snapshotHookConfig(clock);
+
       try {
         await sql.begin(async (tx) => {
           await insertAgentRow(tx, id, spec, createdAt);
