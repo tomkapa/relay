@@ -6,11 +6,23 @@ import { assert } from "../core/assert.ts";
 import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
-import { TenantId, type AgentId, type SessionId, type TenantId as TenantIdBrand } from "../ids.ts";
-import { Attr, SpanName, emit, withSpan } from "../telemetry/otel.ts";
+import {
+  SessionId,
+  TenantId,
+  WorkItemId,
+  type AgentId,
+  type SessionId as SessionIdBrand,
+  type TenantId as TenantIdBrand,
+  type ToolUseId,
+} from "../ids.ts";
+import { idempotencyKeyForAskReply, idempotencyKeyToUuid } from "../core/idempotency.ts";
+import { Attr, SpanName, counter, emit, withSpan } from "../telemetry/otel.ts";
 import { runHooks } from "../hook/run.ts";
 import { snapshotHookConfig } from "../hook/snapshot.ts";
 import { HOOK_EVENT } from "../hook/types.ts";
+import { readFinalTurnResponse } from "./read-final-turn.ts";
+import { writeInboundMessage } from "../trigger/inbound/inbound-ops.ts";
+import { enqueue } from "../work_queue/queue-ops.ts";
 
 // Close reason tags. Additive union — future tasks (abandoned-after-deadline, admin-force-close)
 // extend here. RELAY-93 adds nothing: suspend is NOT a close.
@@ -21,7 +33,7 @@ export type SessionEndReason =
 export type SyncCloseReason = SessionEndReason["kind"];
 
 export type SessionCloseSpec = Readonly<{
-  sessionId: SessionId;
+  sessionId: SessionIdBrand;
   tenantId: TenantIdBrand;
   agentId: AgentId;
   reason: SessionEndReason;
@@ -32,7 +44,7 @@ export type SessionCloseOutcome =
   | { readonly kind: "already_closed"; readonly at: Date };
 
 export type SessionCloseError =
-  | { readonly kind: "session_not_found"; readonly sessionId: SessionId }
+  | { readonly kind: "session_not_found"; readonly sessionId: SessionIdBrand }
   | {
       readonly kind: "tenant_mismatch";
       readonly expected: TenantIdBrand;
@@ -64,10 +76,13 @@ export async function closeSession(
           readonly closed_at: Date | null;
           readonly created_at: Date;
           readonly envelope_id: string | null;
+          readonly parent_session_id: string | null;
+          readonly parent_tool_use_id: string | null;
         }[]
       >`
         SELECT tenant_id, closed_at, created_at,
-               originating_trigger->>'envelopeId' AS envelope_id
+               originating_trigger->>'envelopeId' AS envelope_id,
+               parent_session_id, parent_tool_use_id
         FROM sessions
         WHERE id = ${spec.sessionId}
       `;
@@ -141,12 +156,133 @@ export async function closeSession(
           });
         }
 
+        // Route ask reply to parent session if this is an ask-spawned child.
+        if (row.parent_session_id !== null && row.parent_tool_use_id !== null) {
+          await routeAskReplyOnClose(sql, clock, {
+            childSessionId: spec.sessionId,
+            parentSessionId: row.parent_session_id,
+            parentToolUseId: row.parent_tool_use_id,
+            tenantId: spec.tenantId,
+            childAgentId: spec.agentId,
+          });
+        }
+
         span.setAttribute(Attr.SessionDurationMs, outcome.at.getTime() - row.created_at.getTime());
       }
 
       return ok(outcome);
     },
   );
+}
+
+function dropLateReply(
+  childSessionId: SessionIdBrand,
+  tenantId: TenantIdBrand,
+  parentSessionId: string,
+  reason: "parent_not_found" | "parent_closed",
+): void {
+  counter("relay.session.late_reply_dropped_total").add(1, {
+    [Attr.TenantId]: tenantId,
+    reason,
+  });
+  emit("WARN", `session.ask_reply.${reason}`, {
+    [Attr.SessionId]: childSessionId,
+    [Attr.TenantId]: tenantId,
+    parent_session_id: parentSessionId,
+  });
+}
+
+// Routes the child's final assistant text back to the parent as an inbound message.
+// Called after the SessionEnd hook completes. Failures are caught and logged — they must
+// NOT unwind the close. RELAY-144 §9.
+async function routeAskReplyOnClose(
+  sql: Sql,
+  clock: Clock,
+  spec: {
+    readonly childSessionId: SessionIdBrand;
+    readonly parentSessionId: string;
+    readonly parentToolUseId: string;
+    readonly tenantId: TenantIdBrand;
+    readonly childAgentId: AgentId;
+  },
+): Promise<void> {
+  try {
+    // 1. Read final assistant text from child session.
+    const finalResult = await readFinalTurnResponse(sql, spec.childSessionId);
+    const finalText =
+      finalResult.ok && finalResult.value.text.length > 0
+        ? finalResult.value.text
+        : "<no response — session ended without text>";
+
+    // 2. Check parent session status.
+    const parentRows = await sql<{ closed_at: Date | null }[]>`
+      SELECT closed_at FROM sessions WHERE id = ${spec.parentSessionId} AND tenant_id = ${spec.tenantId}
+    `;
+    if (parentRows.length === 0) {
+      dropLateReply(spec.childSessionId, spec.tenantId, spec.parentSessionId, "parent_not_found");
+      return;
+    }
+    const parentRow = parentRows[0];
+    assert(parentRow !== undefined, "routeAskReplyOnClose: parentRow must exist");
+    if (parentRow.closed_at !== null) {
+      dropLateReply(spec.childSessionId, spec.tenantId, spec.parentSessionId, "parent_closed");
+      return;
+    }
+
+    const iKey = idempotencyKeyForAskReply({
+      childSessionId: spec.childSessionId,
+      parentToolUseId: spec.parentToolUseId,
+    });
+    const workItemIdStr = idempotencyKeyToUuid(iKey);
+    const workItemIdResult = WorkItemId.parse(workItemIdStr);
+    assert(
+      workItemIdResult.ok,
+      "routeAskReplyOnClose: idempotencyKeyToUuid invalid UUID for work item",
+    );
+    const syntheticWorkItemId = workItemIdResult.value;
+
+    const now = new Date(clock.now());
+
+    const parentSessResult = SessionId.parse(spec.parentSessionId);
+    assert(parentSessResult.ok, "routeAskReplyOnClose: invalid parentSessionId", {
+      id: spec.parentSessionId,
+    });
+
+    const inboundResult = await writeInboundMessage(sql, {
+      tenantId: spec.tenantId,
+      targetSessionId: parentSessResult.value,
+      sender: { type: "agent", id: spec.childAgentId },
+      content: finalText,
+      receivedAt: now,
+      sourceWorkItemId: syntheticWorkItemId,
+      sourceToolUseId: spec.parentToolUseId as unknown as ToolUseId,
+    });
+    if (!inboundResult.ok) {
+      emit("WARN", "session.ask_reply.write_inbound_failed", {
+        [Attr.SessionId]: spec.childSessionId,
+        error: inboundResult.error.kind,
+      });
+      return;
+    }
+
+    const workResult = await enqueue(sql, {
+      tenantId: spec.tenantId,
+      kind: "inbound_message",
+      payloadRef: inboundResult.value,
+      scheduledAt: now,
+    });
+    if (!workResult.ok) {
+      emit("WARN", "session.ask_reply.enqueue_failed", {
+        [Attr.SessionId]: spec.childSessionId,
+        error: workResult.error.kind,
+      });
+    }
+  } catch (e) {
+    emit("WARN", "session.ask_reply.route_failed", {
+      [Attr.SessionId]: spec.childSessionId,
+      error: (e as Error).message,
+    });
+  }
 }
 
 // Reads originating_trigger->>'envelopeId'. If present, emits a Postgres NOTIFY so the
@@ -156,7 +292,7 @@ export async function closeSession(
 export async function emitSessionSyncClose(
   sql: Sql,
   spec: {
-    readonly sessionId: SessionId;
+    readonly sessionId: SessionIdBrand;
     readonly reason: SyncCloseReason;
     readonly envelopeId: string | null;
   },
@@ -183,7 +319,7 @@ export async function emitSessionSyncClose(
 
 // Returns false for missing sessions — callers that need to distinguish "not-found" from "open"
 // should use a richer lookup. The 90% case (RELAY-47, RELAY-59) maps cleanly to a boolean.
-export async function isClosed(sql: Sql, sessionId: SessionId): Promise<boolean> {
+export async function isClosed(sql: Sql, sessionId: SessionIdBrand): Promise<boolean> {
   const rows = await sql<{ readonly closed_at: Date | null }[]>`
     SELECT closed_at FROM sessions WHERE id = ${sessionId}
   `;

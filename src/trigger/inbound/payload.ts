@@ -4,7 +4,12 @@
 
 import { z } from "zod";
 import { err, ok, type Result } from "../../core/result.ts";
-import { SessionId, type SessionId as SessionIdBrand } from "../../ids.ts";
+import {
+  SessionId,
+  ToolUseId,
+  type SessionId as SessionIdBrand,
+  type ToolUseId as ToolUseIdBrand,
+} from "../../ids.ts";
 import {
   MAX_INBOUND_CONTENT_BYTES,
   MAX_INBOUND_SENDER_DISPLAY_NAME_LEN,
@@ -21,6 +26,7 @@ export type InboundMessagePayload = {
   readonly targetSessionId: SessionIdBrand;
   readonly content: string;
   readonly receivedAt: Date;
+  readonly sourceToolUseId: ToolUseIdBrand | null; // non-null when routed from an ask() reply
 };
 
 export type InboundPayloadError =
@@ -40,6 +46,7 @@ export type InboundMessageRow = {
   readonly kind: string;
   readonly content: string;
   readonly received_at: Date;
+  readonly source_tool_use_id: string | null;
 };
 
 const InboundRowSchema = z.object({
@@ -52,6 +59,7 @@ const InboundRowSchema = z.object({
   kind: z.literal("message"),
   content: z.string().min(1),
   received_at: z.date(),
+  source_tool_use_id: z.string().min(1).max(128).nullable(),
 });
 
 export function parseInboundMessageRow(
@@ -96,11 +104,24 @@ export function parseInboundMessageRow(
       ? { type: body.sender_type, id: body.sender_id, displayName: body.sender_display_name }
       : { type: body.sender_type, id: body.sender_id };
 
+  let sourceToolUseId: ToolUseIdBrand | null = null;
+  if (body.source_tool_use_id !== null) {
+    const toolResult = ToolUseId.parse(body.source_tool_use_id);
+    if (!toolResult.ok) {
+      return err({
+        kind: "validation_failed",
+        issues: [{ path: "source_tool_use_id", message: toolResult.error.kind }],
+      });
+    }
+    sourceToolUseId = toolResult.value;
+  }
+
   return ok({
     kind: "message",
     sender,
     targetSessionId: sessionResult.value,
     content: body.content,
     receivedAt: body.received_at,
+    sourceToolUseId,
   });
 }

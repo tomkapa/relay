@@ -65,4 +65,5 @@ export type TurnLoopError =
   | { kind: "tool_unknown"; toolName: string }
   | { kind: "turn_cap_exceeded"; max: number }
   | { kind: "timeout"; stage: "model" | "tool" }
-  | { kind: "persist_turn_failed"; detail: string };
+  | { kind: "persist_turn_failed"; detail: string }
+  | { kind: "dispatch_failed"; detail: string };

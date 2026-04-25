@@ -86,6 +86,8 @@ describe("runTurnLoop", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    expect(result.value.kind).toBe("completed");
+    if (result.value.kind !== "completed") return;
     expect(result.value.turns).toHaveLength(1);
     expect(result.value.turns[0]?.toolResults).toHaveLength(0);
     const textBlock = result.value.finalResponse.content[0] as TextBlock;

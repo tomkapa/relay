@@ -12,6 +12,7 @@ import {
   type InboundMessageId as InboundMessageIdBrand,
   type SessionId as SessionIdBrand,
   type TenantId as TenantIdBrand,
+  type ToolUseId as ToolUseIdBrand,
   type WorkItemId,
 } from "../../ids.ts";
 import { MAX_INBOUND_CONTENT_BYTES, MAX_INBOUND_SENDER_EXTERNAL_ID_LEN } from "./limits.ts";
@@ -24,6 +25,7 @@ export type WriteInboundSpec = Readonly<{
   content: string;
   receivedAt: Date;
   sourceWorkItemId: WorkItemId;
+  sourceToolUseId: ToolUseIdBrand | null; // non-null when routed from an ask() reply
 }>;
 
 export type InboundOpsError =
@@ -52,6 +54,7 @@ export async function writeInboundMessage(
 
   const id = mintId(InboundMessageId.parse, "writeInboundMessage");
   const displayName = spec.sender.displayName ?? null;
+  const sourceToolUseId = spec.sourceToolUseId ?? null;
 
   // DO UPDATE with a no-op (received_at = itself) so RETURNING fires on both insert and
   // conflict paths, avoiding a second SELECT round-trip on the duplicate-key case.
@@ -59,12 +62,12 @@ export async function writeInboundMessage(
     INSERT INTO inbound_messages (
       id, tenant_id, target_session_id,
       sender_type, sender_id, sender_display_name,
-      kind, content, received_at, source_work_item_id
+      kind, content, received_at, source_work_item_id, source_tool_use_id
     )
     VALUES (
       ${id}, ${spec.tenantId}, ${spec.targetSessionId},
       ${spec.sender.type}, ${spec.sender.id}, ${displayName},
-      'message', ${spec.content}, ${spec.receivedAt}, ${spec.sourceWorkItemId}
+      'message', ${spec.content}, ${spec.receivedAt}, ${spec.sourceWorkItemId}, ${sourceToolUseId}
     )
     ON CONFLICT (source_work_item_id) WHERE source_work_item_id IS NOT NULL
     DO UPDATE SET received_at = inbound_messages.received_at
@@ -84,7 +87,7 @@ export async function readInboundMessage(
   const rows = await sql<InboundMessageRow[]>`
     SELECT id, tenant_id, target_session_id,
            sender_type, sender_id, sender_display_name,
-           kind, content, received_at
+           kind, content, received_at, source_tool_use_id
     FROM inbound_messages
     WHERE id = ${id}
   `;

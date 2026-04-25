@@ -6,9 +6,16 @@ import { z } from "zod";
 import { err, ok, type Result } from "../core/result.ts";
 import {
   AgentId,
+  ChainId,
+  Depth,
+  SessionId,
   TaskId,
+  ToolUseId,
   type AgentId as AgentIdBrand,
+  type ChainId as ChainIdBrand,
+  type SessionId as SessionIdBrand,
   type TaskId as TaskIdBrand,
+  type ToolUseId as ToolUseIdBrand,
 } from "../ids.ts";
 import {
   MAX_ENVELOPE_BYTES,
@@ -30,6 +37,11 @@ export type TriggerPayload =
       readonly targetAgentId: AgentIdBrand;
       readonly content: string;
       readonly receivedAt: Date;
+      // Optional parent-link fields — present when this message originates from an ask() call.
+      readonly parentSessionId?: SessionIdBrand;
+      readonly parentChainId?: ChainIdBrand;
+      readonly parentDepth?: number;
+      readonly parentToolUseId?: ToolUseIdBrand;
     }
   | {
       readonly kind: "event";
@@ -51,6 +63,10 @@ export type TriggerPayloadError =
   | { kind: "content_too_long"; length: number; max: number }
   | { kind: "unknown_kind"; value: string }
   | { kind: "agent_id_invalid"; reason: string }
+  | { kind: "session_id_invalid"; reason: string }
+  | { kind: "chain_id_invalid"; reason: string }
+  | { kind: "tool_use_id_invalid"; reason: string }
+  | { kind: "depth_invalid"; reason: string }
   | { kind: "task_id_invalid"; reason: string }
   | { kind: "envelope_too_large"; bytes: number; max: number };
 
@@ -73,6 +89,11 @@ const MessagePayloadSchema = z.object({
   targetAgentId: z.uuid(),
   content: z.string().min(1),
   receivedAt: z.iso.datetime(),
+  // Optional parent-link fields present on ask-spawned envelopes.
+  parentSessionId: z.uuid().optional(),
+  parentChainId: z.uuid().optional(),
+  parentDepth: z.number().int().min(0).optional(),
+  parentToolUseId: z.string().min(1).max(128).optional(),
 });
 
 const EventPayloadSchema = z.object({
@@ -124,13 +145,50 @@ export function parseEnvelopePayload(
       body.sender.displayName !== undefined
         ? { type: body.sender.type, id: body.sender.id, displayName: body.sender.displayName }
         : { type: body.sender.type, id: body.sender.id };
-    return ok({
+
+    type MessagePayload = Extract<TriggerPayload, { kind: "message" }>;
+    const base: MessagePayload = {
       kind: "message",
       sender,
       targetAgentId: agentResult.value,
       content: body.content,
       receivedAt: new Date(body.receivedAt),
-    });
+    };
+
+    if (body.parentSessionId !== undefined) {
+      const sessionResult = SessionId.parse(body.parentSessionId);
+      if (!sessionResult.ok) {
+        return err({ kind: "session_id_invalid", reason: sessionResult.error.kind });
+      }
+      const chainResult = ChainId.parse(body.parentChainId ?? "");
+      if (!chainResult.ok) {
+        return err({ kind: "chain_id_invalid", reason: chainResult.error.kind });
+      }
+      if (body.parentDepth === undefined) {
+        return err({ kind: "depth_invalid", reason: "parentDepth required with parentSessionId" });
+      }
+      const depthResult = Depth.parse(body.parentDepth);
+      if (!depthResult.ok) {
+        return err({ kind: "depth_invalid", reason: depthResult.error.kind });
+      }
+      const toolUseIdResult =
+        body.parentToolUseId !== undefined
+          ? ToolUseId.parse(body.parentToolUseId)
+          : ({ ok: false } as const);
+      const parentToolUseId: ToolUseIdBrand | undefined = toolUseIdResult.ok
+        ? toolUseIdResult.value
+        : undefined;
+
+      return ok({
+        ...base,
+        parentSessionId: sessionResult.value,
+        parentChainId: chainResult.value,
+        parentDepth: depthResult.value,
+        ...(parentToolUseId !== undefined ? { parentToolUseId } : {}),
+      });
+    }
+
+    return ok(base);
   }
 
   const agentResult = AgentId.parse(body.targetAgentId);

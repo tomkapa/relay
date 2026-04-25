@@ -47,3 +47,30 @@ export function idempotencyKeyForAgentSeed(input: {
   });
   return sha256Hex(`agent.seed_memory|${input.agentId}|${String(input.index)}`) as IdempotencyKey;
 }
+
+// Deterministic idempotency key for an ask-reply inbound. The child session id + parent tool
+// use id form a globally unique pair, so no turnId is needed here (close has no turn id).
+export function idempotencyKeyForAskReply(input: {
+  readonly childSessionId: SessionId;
+  readonly parentToolUseId: string;
+}): IdempotencyKey {
+  assert(input.parentToolUseId.length > 0, "idempotencyKeyForAskReply: parentToolUseId empty");
+  return sha256Hex(
+    `ask_reply|${input.childSessionId}|close|${input.parentToolUseId}`,
+  ) as IdempotencyKey;
+}
+
+// Convert a 64-hex IdempotencyKey to a deterministic UUID v4 string. Used to derive a
+// stable row-id for `ON CONFLICT (id) DO NOTHING` insert patterns (e.g. envelope dedup).
+// Bits 4-7 of group 3 are fixed to '4' (version) and bits 6-7 of group 4 are fixed to '10'
+// (RFC 4122 variant), overwriting those nibbles from the hash.
+export function idempotencyKeyToUuid(key: IdempotencyKey): string {
+  const h = key as string; // 64 hex chars
+  const p1 = h.slice(0, 8);
+  const p2 = h.slice(8, 12);
+  const p3 = `4${h.slice(13, 16)}`; // version nibble = 4
+  const variantByte = ((parseInt(h.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, "0");
+  const p4 = `${variantByte}${h.slice(18, 20)}`;
+  const p5 = h.slice(20, 32);
+  return `${p1}-${p2}-${p3}-${p4}-${p5}`;
+}

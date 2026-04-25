@@ -62,6 +62,7 @@ export const SpanName = {
   WorkerHandle: "worker.handle",
   SessionClose: "session.close",
   SessionSyncDispatch: "session.sync.dispatch",
+  BoundaryDispatch: "boundary.dispatch",
   HttpTriggerPost: "http.trigger.post",
   EmbeddingCall: "embedding.call",
 } as const;
@@ -112,6 +113,9 @@ export const Attr = {
   MemoryInjectionSkipped: "relay.memory.injection.skipped_reason",
   SyncWaitMs: "relay.http.trigger.sync_wait_ms",
   SessionDurationMs: "relay.session.duration_ms",
+  PendingAskCount: "relay.session.pending_ask_count",
+  SendKind: "relay.send.kind",
+  SendCount: "relay.send.count",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 

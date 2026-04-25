@@ -6,9 +6,11 @@ import type { Sql } from "postgres";
 import { assert } from "../core/assert.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
-import { AgentId, SessionId, TenantId } from "../ids.ts";
+import { AgentId, ChainId, Depth, SessionId, TenantId } from "../ids.ts";
 import type {
   AgentId as AgentIdBrand,
+  ChainId as ChainIdBrand,
+  Depth as DepthBrand,
   SessionId as SessionIdBrand,
   TenantId as TenantIdBrand,
 } from "../ids.ts";
@@ -30,6 +32,8 @@ type JoinRow = {
   readonly agent_id: string;
   readonly tenant_id: string;
   readonly closed_at: Date | null;
+  readonly chain_id: string;
+  readonly depth: number;
   readonly agent_system_prompt: string | null;
   readonly agent_tenant_id: string | null;
 };
@@ -41,7 +45,13 @@ export async function loadOpenTargetSession(
 ): Promise<
   Result<
     {
-      session: { id: SessionIdBrand; agentId: AgentIdBrand; tenantId: TenantIdBrand };
+      session: {
+        id: SessionIdBrand;
+        agentId: AgentIdBrand;
+        tenantId: TenantIdBrand;
+        chainId: ChainIdBrand;
+        depth: DepthBrand;
+      };
       agent: LoadedAgent;
     },
     TargetSessionError
@@ -49,6 +59,7 @@ export async function loadOpenTargetSession(
 > {
   const rows = await sql<JoinRow[]>`
     SELECT s.id, s.agent_id, s.tenant_id, s.closed_at,
+           s.chain_id, s.depth,
            a.system_prompt AS agent_system_prompt,
            a.tenant_id     AS agent_tenant_id
     FROM sessions s
@@ -94,11 +105,21 @@ export async function loadOpenTargetSession(
     agent_tenant_id: row.agent_tenant_id,
   });
 
+  const chainIdResult = ChainId.parse(row.chain_id);
+  assert(chainIdResult.ok, "loadOpenTargetSession: invalid chain_id from DB", {
+    chain_id: row.chain_id,
+  });
+
+  const depthResult = Depth.parse(row.depth);
+  assert(depthResult.ok, "loadOpenTargetSession: invalid depth from DB", { depth: row.depth });
+
   return ok({
     session: {
       id: sessionIdResult.value,
       agentId: agentIdResult.value,
       tenantId: tenantResult.value,
+      chainId: chainIdResult.value,
+      depth: depthResult.value,
     },
     agent: {
       id: agentIdResult.value,
