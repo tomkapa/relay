@@ -32,8 +32,38 @@ describe("agentCreateErrorStatus", () => {
     expect(agentCreateErrorStatus(e)).toBe(400);
   });
 
+  test("seed_memory_too_large maps to 400", () => {
+    const e: AgentCreateError = { kind: "seed_memory_too_large", size: 17, max: 16 };
+    expect(agentCreateErrorStatus(e)).toBe(400);
+  });
+
+  test("seed_memory_text_too_long maps to 400", () => {
+    const e: AgentCreateError = { kind: "seed_memory_text_too_long", bytes: 9000, max: 8192 };
+    expect(agentCreateErrorStatus(e)).toBe(400);
+  });
+
   test("db_conflict maps to 409", () => {
     const e: AgentCreateError = { kind: "db_conflict", detail: "duplicate key value" };
     expect(agentCreateErrorStatus(e)).toBe(409);
+  });
+
+  test("hook_denied maps to 403", () => {
+    const e: AgentCreateError = { kind: "hook_denied", reason: "policy violation" };
+    expect(agentCreateErrorStatus(e)).toBe(403);
+  });
+
+  test("embed_transient maps to 503", () => {
+    const e: AgentCreateError = { kind: "embed_transient", message: "rate limited" };
+    expect(agentCreateErrorStatus(e)).toBe(503);
+  });
+
+  test("embed_permanent maps to 422", () => {
+    const e: AgentCreateError = { kind: "embed_permanent", message: "input rejected" };
+    expect(agentCreateErrorStatus(e)).toBe(422);
+  });
+
+  test("embed_timeout maps to 504", () => {
+    const e: AgentCreateError = { kind: "embed_timeout", elapsedMs: 10000 };
+    expect(agentCreateErrorStatus(e)).toBe(504);
   });
 });

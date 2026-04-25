@@ -5,12 +5,18 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { Sql } from "postgres";
 import type { Clock } from "../core/clock.ts";
+import type { EmbeddingClient } from "../memory/embedding.ts";
 import { MAX_REQUEST_BYTES } from "./limits.ts";
 import type { ReplyRegistry } from "./reply-registry.ts";
 import { agentsRoute } from "./routes/agents.ts";
 import { triggerRoute } from "./routes/trigger.ts";
 
-export type AppDeps = { sql: Sql; clock: Clock; registry: ReplyRegistry };
+export type AppDeps = {
+  sql: Sql;
+  clock: Clock;
+  registry: ReplyRegistry;
+  embedder: EmbeddingClient;
+};
 
 export function makeApp(deps: AppDeps): Hono {
   const app = new Hono();

@@ -91,6 +91,17 @@ export type PreMessageSendPayload = Readonly<{
   idempotencyKey: string;
 }>;
 
+// Metadata-only payload for agent_create: no system prompt text, no seed-memory contents.
+// Metadata-only keeps cardinality low and avoids accidental PII in audit rows.
+export type AgentCreatePayload = Readonly<{
+  tenantId: TenantId;
+  agentId: AgentId;
+  systemPromptLen: number;
+  toolSetSize: number;
+  hookRulesSize: number;
+  seedMemoryCount: number;
+}>;
+
 // Discriminated union — the type-level lookup uses Extract<...> to resolve event → payload.
 // Listing a new event without its payload pair causes PayloadFor<E> to return never,
 // breaking all call sites at compile time. Same exhaustive-coverage trick as CLAUDE.md §1.
@@ -100,7 +111,8 @@ export type HookEventPayload =
   | { readonly event: "pre_tool_use"; readonly payload: PreToolUsePayload }
   | { readonly event: "post_tool_use"; readonly payload: PostToolUsePayload }
   | { readonly event: "pre_message_receive"; readonly payload: PreMessageReceivePayload }
-  | { readonly event: "pre_message_send"; readonly payload: PreMessageSendPayload };
+  | { readonly event: "pre_message_send"; readonly payload: PreMessageSendPayload }
+  | { readonly event: "agent_create"; readonly payload: AgentCreatePayload };
 
 // Compile-time event → payload lookup. A missing pair returns never, breaking call sites.
 export type PayloadFor<E extends HookEvent> = Extract<HookEventPayload, { event: E }>["payload"];

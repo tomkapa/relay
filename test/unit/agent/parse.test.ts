@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   MAX_HOOK_RULES_PER_AGENT,
+  MAX_SEED_MEMORIES,
   MAX_SYSTEM_PROMPT_LEN,
   MAX_TOOL_SET_SIZE,
 } from "../../../src/agent/limits.ts";
+import { MAX_ENTRY_TEXT_BYTES } from "../../../src/memory/limits.ts";
 import { parseAgentCreate } from "../../../src/agent/parse.ts";
 
 const VALID_V4_UUID = "550e8400-e29b-41d4-a716-446655440000";
@@ -133,6 +135,75 @@ describe("parseAgentCreate — tenantId validation", () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe("tenant_id_invalid");
+  });
+});
+
+describe("parseAgentCreate — seedMemory field", () => {
+  test("seedMemory defaults to empty array when omitted", () => {
+    const r = parseAgentCreate(validBody());
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.seedMemory).toEqual([]);
+  });
+
+  test("valid seedMemory entries are accepted and importance is branded", () => {
+    const r = parseAgentCreate(
+      validBody({
+        seedMemory: [
+          { text: "agent knows TypeScript", importance: 0.8 },
+          { text: "prefers concise answers" },
+        ],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.seedMemory.length).toBe(2);
+    expect(r.value.seedMemory[0]?.text).toBe("agent knows TypeScript");
+    expect(r.value.seedMemory[0]?.importance as number).toBe(0.8);
+    expect(r.value.seedMemory[1]?.importance as number).toBe(0.5); // DEFAULT_IMPORTANCE
+  });
+
+  test("seedMemory exactly at cap is accepted", () => {
+    const entries = Array.from({ length: MAX_SEED_MEMORIES }, (_, i) => ({
+      text: `fact ${String(i)}`,
+    }));
+    const r = parseAgentCreate(validBody({ seedMemory: entries }));
+    expect(r.ok).toBe(true);
+  });
+
+  test("seedMemory one over cap returns seed_memory_too_large", () => {
+    const entries = Array.from({ length: MAX_SEED_MEMORIES + 1 }, (_, i) => ({
+      text: `fact ${String(i)}`,
+    }));
+    const r = parseAgentCreate(validBody({ seedMemory: entries }));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("seed_memory_too_large");
+    if (r.error.kind === "seed_memory_too_large") {
+      expect(r.error.size).toBe(MAX_SEED_MEMORIES + 1);
+      expect(r.error.max).toBe(MAX_SEED_MEMORIES);
+    }
+  });
+
+  test("empty text returns validation_failed", () => {
+    const r = parseAgentCreate(validBody({ seedMemory: [{ text: "" }] }));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("validation_failed");
+  });
+
+  test("text exceeding MAX_ENTRY_TEXT_BYTES returns seed_memory_text_too_long", () => {
+    // Use a multi-byte character to exceed byte limit without exceeding char count limit.
+    // One '€' is 3 bytes; enough of them over MAX_ENTRY_TEXT_BYTES / 3 + 1 will exceed limit.
+    const overLimitBytes = "€".repeat(Math.ceil(MAX_ENTRY_TEXT_BYTES / 3) + 1);
+    const r = parseAgentCreate(validBody({ seedMemory: [{ text: overLimitBytes }] }));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("seed_memory_text_too_long");
+    if (r.error.kind === "seed_memory_text_too_long") {
+      expect(r.error.bytes).toBeGreaterThan(MAX_ENTRY_TEXT_BYTES);
+      expect(r.error.max).toBe(MAX_ENTRY_TEXT_BYTES);
+    }
   });
 });
 
