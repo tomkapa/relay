@@ -428,6 +428,10 @@ async function handleTaskFire(
         agentResult.value,
         synthSignal,
       );
+      const context0 = context[0];
+      assert(context0 !== undefined, "handleTaskFire: context[0] must exist");
+      assert(context0.role === "system", "handleTaskFire: context[0] must be system entry");
+      const enrichedSystemPrompt = context0.content;
 
       const sessionResult = await createSession(deps.sql, deps.clock, {
         agentId: payload.agentId,
@@ -446,15 +450,22 @@ async function handleTaskFire(
       });
       if (!sessionResult.ok) return err(mapSessionError(sessionResult.error));
 
-      return finalizeSession(
+      const session = sessionResult.value;
+      if (session.isDuplicate) {
+        return finalizeSession(deps, item, session, payload.agentId, chainId, depth, null);
+      }
+
+      const loopResult = await runLoopAndClose(
         deps,
         item,
-        sessionResult.value,
+        session,
         payload.agentId,
-        chainId,
-        depth,
-        null,
+        enrichedSystemPrompt,
+        context,
       );
+      if (!loopResult.ok) return loopResult;
+
+      return finalizeSession(deps, item, session, payload.agentId, chainId, depth, null);
     },
   );
 }
