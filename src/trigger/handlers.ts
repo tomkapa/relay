@@ -23,7 +23,7 @@ import type { AgentLoadError } from "../agent/load.ts";
 import { readEnvelope } from "./envelope-ops.ts";
 import type { EnvelopeError } from "./envelope-ops.ts";
 import { parseEnvelopePayload, parseTaskRow } from "./payload.ts";
-import type { TaskRow, TriggerPayload, TriggerPayloadError } from "./payload.ts";
+import type { TaskRow, TriggerPayloadError } from "./payload.ts";
 import { synthesizeOpeningContext } from "./synthesize.ts";
 import { createSession } from "../session/create.ts";
 import type { SessionCreateError } from "../session/create.ts";
@@ -38,7 +38,7 @@ import { EMBEDDING_CALL_TIMEOUT_MS } from "../memory/limits.ts";
 import type { ModelClient } from "../session/model.ts";
 import type { ToolRegistry } from "../session/tools.ts";
 import { runTurnLoop } from "../session/turn-loop.ts";
-import type { HookResult } from "../hook/types.ts";
+import { evaluateHook } from "../hook/evaluate.ts";
 import type { Message } from "../session/turn.ts";
 import { closeSession } from "../session/close.ts";
 import type { SessionCloseError, SessionEndReason } from "../session/close.ts";
@@ -52,16 +52,9 @@ export type HandlerDeps = {
   readonly embedder: EmbeddingClient;
 };
 
-// Pass-through hook seam for session creation. Replaced by RELAY-36 evaluator; named params
-// are omitted here — the real evaluator uses them.
-// NOTE: Session row is already committed before this check. If the real evaluator can deny,
-// the deny path must either run before createSession or handle the orphaned row (RELAY-36).
-const hookStub: (sessionId: SessionIdBrand, payload: TriggerPayload) => Promise<HookResult> = () =>
-  Promise.resolve({ decision: "approve" });
-
-// Pass-through stub for RELAY-36/37 evaluator.
-const preMessageReceiveStub: () => Promise<HookResult> = () =>
-  Promise.resolve({ decision: "approve" });
+// Stub hook IDs — TEXT until hook_rules ships (RELAY-138+).
+const HOOK_ID_SESSION_START = "system/session-start/stub";
+const HOOK_ID_PRE_MSG_RECEIVE = "system/pre-message-receive/stub";
 
 export function openingContextToLoopInput(
   context: readonly TranscriptEntry[],
@@ -246,12 +239,23 @@ async function runLoopAndClose(
 }
 
 async function finalizeSession(
-  _deps: HandlerDeps,
+  deps: HandlerDeps,
   item: WorkItem,
   sessionResult: { id: SessionIdBrand; isDuplicate: boolean },
-  payload: TriggerPayload,
+  agentId: AgentIdBrand,
 ): Promise<Result<void, HandlerError>> {
-  const hook = await hookStub(sessionResult.id, payload);
+  const hook = await evaluateHook(deps.sql, deps.clock, {
+    hookId: HOOK_ID_SESSION_START,
+    layer: "system",
+    event: "session_start",
+    matcherResult: true,
+    tenantId: item.tenantId,
+    agentId,
+    sessionId: sessionResult.id,
+    turnId: null,
+    toolName: null,
+    decide: () => Promise.resolve({ decision: "approve" }),
+  });
   if (hook.decision === "deny") {
     return err<HandlerError>({ kind: "handler_failed", reason: `hook denied: ${hook.reason}` });
   }
@@ -332,7 +336,7 @@ async function handleSessionStart(
 
       const session = sessionResult.value;
       if (session.isDuplicate) {
-        return finalizeSession(deps, item, session, payload);
+        return finalizeSession(deps, item, session, payload.targetAgentId);
       }
 
       const loopResult = await runLoopAndClose(
@@ -345,7 +349,7 @@ async function handleSessionStart(
       );
       if (!loopResult.ok) return loopResult;
 
-      return finalizeSession(deps, item, session, payload);
+      return finalizeSession(deps, item, session, payload.targetAgentId);
     },
   );
 }
@@ -430,7 +434,7 @@ async function handleTaskFire(
       });
       if (!sessionResult.ok) return err(mapSessionError(sessionResult.error));
 
-      return finalizeSession(deps, item, sessionResult.value, payload);
+      return finalizeSession(deps, item, sessionResult.value, payload.agentId);
     },
   );
 }
@@ -540,7 +544,18 @@ async function handleInboundMessage(
       );
       if (!targetResult.ok) return err(mapTargetSessionError(targetResult.error));
 
-      const hook = await preMessageReceiveStub();
+      const hook = await evaluateHook(deps.sql, deps.clock, {
+        hookId: HOOK_ID_PRE_MSG_RECEIVE,
+        layer: "system",
+        event: "pre_message_receive",
+        matcherResult: true,
+        tenantId: item.tenantId,
+        agentId: targetResult.value.session.agentId,
+        sessionId: payload.targetSessionId,
+        turnId: null,
+        toolName: null,
+        decide: () => Promise.resolve({ decision: "approve" }),
+      });
       if (hook.decision === "deny") {
         return err<HandlerError>({ kind: "handler_failed", reason: `hook denied: ${hook.reason}` });
       }

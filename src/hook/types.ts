@@ -3,7 +3,31 @@
 
 import type { AgentId, SessionId, TenantId, ToolUseId, TurnId } from "../ids.ts";
 
-export type HookResult = { decision: "approve" } | { decision: "deny"; reason: string };
+// Canonical decision returned by a hook's decide-fn and by evaluateHook.
+// `modify` carries a transformed payload (shape fills in with RELAY-138).
+export type HookDecision =
+  | { readonly decision: "approve" }
+  | { readonly decision: "deny"; readonly reason: string }
+  | { readonly decision: "modify"; readonly payload: HookPayload };
+
+// Backward-compat alias — existing stubs return HookResult which is the same union.
+export type HookResult = HookDecision;
+
+// Three-layer composition (RELAY-139). Today all evaluations are "system".
+export type HookLayer = "system" | "organization" | "agent";
+
+// Lifecycle events the hook subsystem observes (matches hook_audit.event CHECK constraint).
+export type HookEvent =
+  | "session_start"
+  | "session_end"
+  | "pre_tool_use"
+  | "post_tool_use"
+  | "pre_message_receive"
+  | "pre_message_send";
+
+// Payload union — one variant per event kind. Shapes fill in with RELAY-138.
+// Placeholder until the real CEL predicate evaluator needs typed access to the payload.
+export type HookPayload = Record<string, unknown>;
 
 export type PreToolUsePayload = {
   readonly sessionId: SessionId;

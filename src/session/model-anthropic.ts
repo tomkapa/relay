@@ -63,8 +63,11 @@ function toAnthropicContent(block: ContentBlock): AnthropicContent {
 }
 
 function toAnthropicMessage(msg: Message): AnthropicMessage {
+  // system_synthetic messages surface as user-role content — Anthropic's API does not
+  // allow interleaved system blocks in the messages array.
+  const role = msg.role === "system_synthetic" ? "user" : msg.role;
   return {
-    role: msg.role,
+    role,
     content: msg.content.map(toAnthropicContent),
   };
 }

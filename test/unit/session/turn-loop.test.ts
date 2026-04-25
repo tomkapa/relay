@@ -25,14 +25,7 @@ import {
   sumCounter,
   type MetricFixture,
 } from "../../helpers/metrics.ts";
-
-// Minimal fake Sql: INSERT returns no rows; sql.json passes value through.
-function makeFakeSql(): Sql {
-  const tag = (): Promise<never[]> => Promise.resolve([]);
-  // postgres.js sql.json is used as a serializer; identity is fine for unit tests
-  Object.assign(tag, { json: (v: unknown) => v });
-  return tag as unknown as Sql;
-}
+import { makeFakeSql } from "../../helpers/fake-sql.ts";
 
 function makeIds(): { sessionId: SessionId; agentId: AgentId; tenantId: TenantId } {
   const s = SessionIdParser.parse(randomUUID());
@@ -72,8 +65,8 @@ let ids: ReturnType<typeof makeIds>;
 
 beforeEach(() => {
   clock = new FakeClock(1_000_000);
-  sql = makeFakeSql();
   ids = makeIds();
+  sql = makeFakeSql(ids.tenantId);
 });
 
 describe("runTurnLoop", () => {
@@ -327,8 +320,8 @@ describe("saturation counters — turn loop", () => {
   beforeEach(() => {
     fixture = installMetricFixture();
     clock = new FakeClock(1_000_000);
-    sql = makeFakeSql();
     ids = makeIds();
+    sql = makeFakeSql(ids.tenantId);
   });
 
   afterEach(async () => {
@@ -408,8 +401,8 @@ describe("saturation counters — tool dispatch", () => {
   beforeEach(() => {
     fixture = installMetricFixture();
     clock = new FakeClock(1_000_000);
-    sql = makeFakeSql();
     ids = makeIds();
+    sql = makeFakeSql(ids.tenantId);
   });
 
   afterEach(async () => {
@@ -482,8 +475,8 @@ const approveStub: (p: PreToolUsePayload | PostToolUsePayload) => Promise<HookRe
 describe("hook seams — call order and payloads", () => {
   beforeEach(() => {
     clock = new FakeClock(1_000_000);
-    sql = makeFakeSql();
     ids = makeIds();
+    sql = makeFakeSql(ids.tenantId);
   });
 
   test("preToolUse called before invoke, postToolUse called after (ordered log)", async () => {
@@ -669,8 +662,8 @@ describe("hook seams — relay.hook.evaluation_total counter", () => {
   beforeEach(() => {
     fixture = installMetricFixture();
     clock = new FakeClock(1_000_000);
-    sql = makeFakeSql();
     ids = makeIds();
+    sql = makeFakeSql(ids.tenantId);
   });
 
   afterEach(async () => {

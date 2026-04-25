@@ -26,12 +26,7 @@ import {
   uninstallMetricFixture,
   type MetricFixture,
 } from "../../helpers/metrics.ts";
-
-function makeFakeSql(): Sql {
-  const tag = (): Promise<never[]> => Promise.resolve([]);
-  Object.assign(tag, { json: (v: unknown) => v });
-  return tag as unknown as Sql;
-}
+import { makeFakeSql } from "../../helpers/fake-sql.ts";
 
 function makeIds(): { sessionId: SessionId; agentId: AgentId; tenantId: TenantId } {
   const s = SessionIdParser.parse(randomUUID());
@@ -76,8 +71,8 @@ describe("turn-loop GenAI instrumentation", () => {
     spans = installSpanFixture();
     metrics = installMetricFixture();
     clock = new FakeClock(1_000_000);
-    sql = makeFakeSql();
     ids = makeIds();
+    sql = makeFakeSql(ids.tenantId);
   });
 
   afterEach(async () => {

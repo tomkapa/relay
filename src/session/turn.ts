@@ -20,7 +20,14 @@ export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
 
 export type Message =
   | { readonly role: "user"; readonly content: readonly ContentBlock[] }
-  | { readonly role: "assistant"; readonly content: readonly ContentBlock[] };
+  | { readonly role: "assistant"; readonly content: readonly ContentBlock[] }
+  | {
+      // Internal role for synthetic deny messages injected before a turn.
+      // Mapped to "user" content at the model-client boundary (Anthropic forbids
+      // multi-block system messages inside the messages array).
+      readonly role: "system_synthetic";
+      readonly content: readonly ContentBlock[];
+    };
 
 export type StopReason =
   | "end_turn"
