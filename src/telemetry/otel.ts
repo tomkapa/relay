@@ -50,6 +50,7 @@ export const SpanName = {
   SessionTurn: "session.turn",
   SessionCreate: "session.create",
   HookEvaluate: "hook.evaluate",
+  HookRun: "hook.run",
   ToolCall: "tool.call",
   ModelCall: "model.call",
   MemoryRetrieve: "memory.retrieve",

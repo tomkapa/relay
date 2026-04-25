@@ -35,22 +35,17 @@ import type {
   Turn,
   TurnLoopError,
 } from "./turn.ts";
-import type { HookSeams } from "../hook/types.ts";
-import { preToolUseStub, postToolUseStub } from "../hook/stubs.ts";
-import { evaluateHook } from "../hook/evaluate.ts";
+import type { PostToolUsePayload, PreToolUsePayload } from "../hook/types.ts";
+import { HOOK_EVENT } from "../hook/types.ts";
+import { runHooks } from "../hook/run.ts";
 import { drainPendingSystemMessages } from "../hook/pending.ts";
 import { MAX_PENDING_MESSAGES_PER_TURN } from "../hook/limits.ts";
-
-// Stub hook IDs — TEXT until hook_rules ships (RELAY-138+).
-const HOOK_ID_PRE_TOOL_USE = "system/pre-tool-use/stub";
-const HOOK_ID_POST_TOOL_USE = "system/post-tool-use/stub";
 
 type LoopDeps = {
   readonly sql: Sql;
   readonly clock: Clock;
   readonly model: ModelClient;
   readonly tools: ToolRegistry;
-  readonly hooks?: HookSeams;
   readonly maxTurns?: number;
   readonly modelTimeoutMs?: number;
   readonly toolTimeoutMs?: number;
@@ -167,30 +162,33 @@ async function dispatchOneBlock(
   block: ToolUseBlock,
   ctx: TurnCtx,
   timeoutMs: number,
-  hooks: HookSeams,
   toolAttrs: Attributes,
   toolCompletions: Counter,
   sql: Sql,
   clock: Clock,
 ): Promise<Result<ToolResultBlock, TurnLoopError>> {
-  const preDecision = await evaluateHook(sql, clock, {
-    hookId: HOOK_ID_PRE_TOOL_USE,
-    layer: "system",
-    event: "pre_tool_use",
-    matcherResult: true,
-    tenantId: ctx.tenantId,
-    agentId: ctx.agentId,
+  const prePayload: PreToolUsePayload = {
     sessionId: ctx.sessionId,
+    agentId: ctx.agentId,
+    tenantId: ctx.tenantId,
     turnId: ctx.turnId,
+    toolUseId: block.id,
     toolName: block.name,
-    decide: () =>
-      hooks.preToolUse({
-        ...ctx,
-        toolUseId: block.id,
-        toolName: block.name,
-        toolInput: block.input,
-      }),
-  });
+    toolInput: block.input,
+  };
+  const preDecision = await runHooks<PreToolUsePayload>(
+    sql,
+    clock,
+    {
+      tenantId: ctx.tenantId,
+      agentId: ctx.agentId,
+      sessionId: ctx.sessionId,
+      turnId: ctx.turnId,
+      toolName: block.name,
+      event: HOOK_EVENT.PreToolUse,
+    },
+    prePayload,
+  );
 
   if (preDecision.decision === "deny") {
     // Inline error tool_result per RELAY-135 design; pending message already enqueued.
@@ -228,24 +226,28 @@ async function dispatchOneBlock(
     [Attr.Outcome]: toolResult.ok ? "invoked" : "tool_error",
   });
 
-  const postDecision = await evaluateHook(sql, clock, {
-    hookId: HOOK_ID_POST_TOOL_USE,
-    layer: "system",
-    event: "post_tool_use",
-    matcherResult: true,
-    tenantId: ctx.tenantId,
-    agentId: ctx.agentId,
+  const postPayload: PostToolUsePayload = {
     sessionId: ctx.sessionId,
+    agentId: ctx.agentId,
+    tenantId: ctx.tenantId,
     turnId: ctx.turnId,
+    toolUseId: block.id,
     toolName: block.name,
-    decide: () =>
-      hooks.postToolUse({
-        ...ctx,
-        toolUseId: block.id,
-        toolName: block.name,
-        outcome: toolResult.ok ? "invoked" : "tool_error",
-      }),
-  });
+    outcome: toolResult.ok ? "invoked" : "tool_error",
+  };
+  const postDecision = await runHooks<PostToolUsePayload>(
+    sql,
+    clock,
+    {
+      tenantId: ctx.tenantId,
+      agentId: ctx.agentId,
+      sessionId: ctx.sessionId,
+      turnId: ctx.turnId,
+      toolName: block.name,
+      event: HOOK_EVENT.PostToolUse,
+    },
+    postPayload,
+  );
 
   if (postDecision.decision === "deny") {
     // Post-tool-use deny: replace tool result with error. Pending message already enqueued.
@@ -272,7 +274,6 @@ async function dispatchTools(
   toolSchemas: readonly ToolSchema[],
   ctx: TurnCtx,
   timeoutMs: number,
-  hooks: HookSeams,
   sql: Sql,
   clock: Clock,
 ): Promise<Result<readonly ToolResultBlock[], TurnLoopError>> {
@@ -310,7 +311,6 @@ async function dispatchTools(
       block,
       ctx,
       timeoutMs,
-      hooks,
       toolAttrs,
       toolCompletions,
       sql,
@@ -324,7 +324,7 @@ async function dispatchTools(
 }
 
 async function runOneTurn(
-  deps: { model: ModelClient; tools: ToolRegistry; clock: Clock; hooks: HookSeams; sql: Sql },
+  deps: { model: ModelClient; tools: ToolRegistry; clock: Clock; sql: Sql },
   input: OneTurnInput,
 ): Promise<Result<Turn, TurnLoopError>> {
   const turnId = mintId(TurnId.parse, "runOneTurn");
@@ -363,7 +363,6 @@ async function runOneTurn(
         input.toolSchemas,
         ctx,
         input.toolTimeoutMs,
-        deps.hooks,
         deps.sql,
         deps.clock,
       );
@@ -395,10 +394,6 @@ export async function runTurnLoop(
 
   const modelTimeoutMs = deps.modelTimeoutMs ?? MODEL_CALL_TIMEOUT_MS;
   const toolTimeoutMs = deps.toolTimeoutMs ?? TOOL_CALL_TIMEOUT_MS;
-  const hooks: HookSeams = deps.hooks ?? {
-    preToolUse: preToolUseStub,
-    postToolUse: postToolUseStub,
-  };
   const messages: Message[] = [...input.initialMessages];
   const turns: Turn[] = [];
   const toolSchemas = deps.tools.list();
@@ -453,7 +448,7 @@ export async function runTurnLoop(
     }
 
     const turnResult = await runOneTurn(
-      { model: deps.model, tools: deps.tools, clock: deps.clock, hooks, sql: deps.sql },
+      { model: deps.model, tools: deps.tools, clock: deps.clock, sql: deps.sql },
       {
         index: i,
         sessionId: input.sessionId,

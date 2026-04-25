@@ -6,6 +6,7 @@ import {
   Depth,
   DEPTH_CAP,
   HookId,
+  HookRecordId,
   Importance,
   MemoryId,
   RetrievalK,
@@ -208,6 +209,60 @@ describe("mintId", () => {
     const a = mintId(SessionId.parse, "test") as string;
     const b = mintId(SessionId.parse, "test") as string;
     expect(a).not.toBe(b);
+  });
+});
+
+describe("HookRecordId.parse", () => {
+  test("accepts a UUIDv4", () => {
+    const r = HookRecordId.parse(VALID_V4);
+    expect(r.ok).toBe(true);
+  });
+
+  test("accepts a UUIDv7", () => {
+    const r = HookRecordId.parse(VALID_V7);
+    expect(r.ok).toBe(true);
+  });
+
+  test("accepts system/<event>/<name> tag", () => {
+    const r = HookRecordId.parse("system/session_start/loop_safety");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value as string).toBe("system/session_start/loop_safety");
+  });
+
+  test("accepts system/<event>/<name> with hyphens in name", () => {
+    const r = HookRecordId.parse("system/pre_tool_use/deny-http");
+    expect(r.ok).toBe(true);
+  });
+
+  test("rejects empty", () => {
+    const r = HookRecordId.parse("");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("empty");
+  });
+
+  test("rejects overlong string", () => {
+    const r = HookRecordId.parse("x".repeat(73 + 1));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("too_long");
+  });
+
+  test("rejects plain string that is neither UUID nor system tag", () => {
+    const r = HookRecordId.parse("not-a-valid-id");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("malformed");
+  });
+
+  test("rejects system tag missing <name> segment", () => {
+    const r = HookRecordId.parse("system/session_start");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.kind).toBe("malformed");
+  });
+
+  test("normalizes UUID case to lowercase", () => {
+    const upper = "550E8400-E29B-41D4-A716-446655440000";
+    const r = HookRecordId.parse(upper);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value as string).toBe(VALID_V4);
   });
 });
 
