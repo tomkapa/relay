@@ -38,7 +38,8 @@ import { EMBEDDING_CALL_TIMEOUT_MS } from "../memory/limits.ts";
 import type { ModelClient } from "../session/model.ts";
 import type { ToolRegistry } from "../session/tools.ts";
 import { runTurnLoop } from "../session/turn-loop.ts";
-import { evaluateHook } from "../hook/evaluate.ts";
+import { runHooks } from "../hook/run.ts";
+import { HOOK_EVENT } from "../hook/types.ts";
 import type { Message } from "../session/turn.ts";
 import { closeSession } from "../session/close.ts";
 import type { SessionCloseError, SessionEndReason } from "../session/close.ts";
@@ -51,10 +52,6 @@ export type HandlerDeps = {
   readonly tools: ToolRegistry;
   readonly embedder: EmbeddingClient;
 };
-
-// Stub hook IDs — TEXT until hook_rules ships (RELAY-138+).
-const HOOK_ID_SESSION_START = "system/session-start/stub";
-const HOOK_ID_PRE_MSG_RECEIVE = "system/pre-message-receive/stub";
 
 export function openingContextToLoopInput(
   context: readonly TranscriptEntry[],
@@ -244,20 +241,24 @@ async function finalizeSession(
   sessionResult: { id: SessionIdBrand; isDuplicate: boolean },
   agentId: AgentIdBrand,
 ): Promise<Result<void, HandlerError>> {
-  const hook = await evaluateHook(deps.sql, deps.clock, {
-    hookId: HOOK_ID_SESSION_START,
-    layer: "system",
-    event: "session_start",
-    matcherResult: true,
-    tenantId: item.tenantId,
-    agentId,
-    sessionId: sessionResult.id,
-    turnId: null,
-    toolName: null,
-    decide: () => Promise.resolve({ decision: "approve" }),
-  });
-  if (hook.decision === "deny") {
-    return err<HandlerError>({ kind: "handler_failed", reason: `hook denied: ${hook.reason}` });
+  const aggregate = await runHooks(
+    deps.sql,
+    deps.clock,
+    {
+      tenantId: item.tenantId,
+      agentId,
+      sessionId: sessionResult.id,
+      turnId: null,
+      toolName: null,
+      event: HOOK_EVENT.SessionStart,
+    },
+    { tenantId: item.tenantId, agentId, sessionId: sessionResult.id },
+  );
+  if (aggregate.decision === "deny") {
+    return err<HandlerError>({
+      kind: "handler_failed",
+      reason: `hook denied: ${aggregate.reason}`,
+    });
   }
 
   if (sessionResult.isDuplicate) {
@@ -544,20 +545,28 @@ async function handleInboundMessage(
       );
       if (!targetResult.ok) return err(mapTargetSessionError(targetResult.error));
 
-      const hook = await evaluateHook(deps.sql, deps.clock, {
-        hookId: HOOK_ID_PRE_MSG_RECEIVE,
-        layer: "system",
-        event: "pre_message_receive",
-        matcherResult: true,
-        tenantId: item.tenantId,
-        agentId: targetResult.value.session.agentId,
-        sessionId: payload.targetSessionId,
-        turnId: null,
-        toolName: null,
-        decide: () => Promise.resolve({ decision: "approve" }),
-      });
-      if (hook.decision === "deny") {
-        return err<HandlerError>({ kind: "handler_failed", reason: `hook denied: ${hook.reason}` });
+      const aggregate = await runHooks(
+        deps.sql,
+        deps.clock,
+        {
+          tenantId: item.tenantId,
+          agentId: targetResult.value.session.agentId,
+          sessionId: payload.targetSessionId,
+          turnId: null,
+          toolName: null,
+          event: HOOK_EVENT.PreMessageReceive,
+        },
+        {
+          tenantId: item.tenantId,
+          agentId: targetResult.value.session.agentId,
+          sessionId: payload.targetSessionId,
+        },
+      );
+      if (aggregate.decision === "deny") {
+        return err<HandlerError>({
+          kind: "handler_failed",
+          reason: `hook denied: ${aggregate.reason}`,
+        });
       }
 
       counter("relay.trigger.inbound_message_delivered_total").add(1, {

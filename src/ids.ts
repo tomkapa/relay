@@ -15,6 +15,7 @@ export type ToolUseId = Brand<string, "ToolUseId">;
 export type TaskId = Brand<string, "TaskId">;
 export type MemoryId = Brand<string, "MemoryId">;
 export type HookId = Brand<string, "HookId">;
+export type HookRecordId = Brand<string, "HookRecordId">;
 export type HookAuditId = Brand<string, "HookAuditId">;
 export type PendingSystemMessageId = Brand<string, "PendingSystemMessageId">;
 export type TenantId = Brand<string, "TenantId">;
@@ -60,6 +61,21 @@ export const MemoryId = {
 };
 export const HookId = {
   parse: (raw: string): Result<HookId, IdParseError> => parseUuid<"HookId">(raw),
+};
+
+// Accepts a UUID v4/v7 OR a stable system hook tag in the form system/<event>/<name>.
+// UUID form is used for customer-authored rules (hook_rules PK, RELAY-225).
+// System tag form is used for in-tree hooks registered at startup.
+const SYSTEM_HOOK_ID_RE = /^system\/[a-z_]+\/[a-z0-9_-]+$/;
+export const HookRecordId = {
+  parse(raw: string): Result<HookRecordId, IdParseError> {
+    if (raw.length === 0) return err({ kind: "empty" });
+    if (raw.length > ID_MAX_LEN * 2)
+      return err({ kind: "too_long", length: raw.length, max: ID_MAX_LEN * 2 });
+    if (UUID_RE.test(raw)) return ok(raw.toLowerCase() as HookRecordId);
+    if (SYSTEM_HOOK_ID_RE.test(raw)) return ok(raw as HookRecordId);
+    return err({ kind: "malformed", reason: "must be UUID or system/<event>/<name>" });
+  },
 };
 export const HookAuditId = {
   parse: (raw: string): Result<HookAuditId, IdParseError> => parseUuid<"HookAuditId">(raw),

@@ -18,11 +18,10 @@ import type { ToolRegistry, ToolResult } from "../../../src/session/tools.ts";
 import { runTurnLoop } from "../../../src/session/turn-loop.ts";
 import type { Message, ModelResponse, TextBlock, ToolUseBlock } from "../../../src/session/turn.ts";
 import { InMemoryToolRegistry, echoTool } from "../../../src/session/tools-inmemory.ts";
-import type {
-  HookDecision,
-  PostToolUsePayload,
-  PreToolUsePayload,
-} from "../../../src/hook/types.ts";
+import type { PostToolUsePayload, PreToolUsePayload } from "../../../src/hook/types.ts";
+import { HOOK_EVENT } from "../../../src/hook/types.ts";
+import { __clearRegistryForTesting, registerHook } from "../../../src/hook/registry.ts";
+import { HookRecordId } from "../../../src/ids.ts";
 import {
   installMetricFixture,
   uninstallMetricFixture,
@@ -473,27 +472,47 @@ describe("saturation counters — tool dispatch", () => {
   });
 });
 
-const approveStub: (p: PreToolUsePayload | PostToolUsePayload) => Promise<HookDecision> = () =>
-  Promise.resolve({ decision: "approve" });
+function makeHookId(tag: string) {
+  const r = HookRecordId.parse(tag);
+  assert(r.ok, `turn-loop.test: invalid HookRecordId: ${tag}`);
+  return r.value;
+}
 
-describe("hook seams — call order and payloads", () => {
+describe("hook registry — call order and payloads", () => {
   beforeEach(() => {
+    __clearRegistryForTesting();
     clock = new FakeClock(1_000_000);
     ids = makeIds();
     sql = makeFakeSql(ids.tenantId);
   });
 
-  test("preToolUse called before invoke, postToolUse called after (ordered log)", async () => {
+  afterEach(() => {
+    __clearRegistryForTesting();
+  });
+
+  test("pre hook fires before tool invoke, post hook fires after (ordered log)", async () => {
     const log: string[] = [];
 
-    const preStub: (p: PreToolUsePayload) => Promise<HookDecision> = () => {
-      log.push("pre");
-      return Promise.resolve({ decision: "approve" });
-    };
-    const postStub: (p: PostToolUsePayload) => Promise<HookDecision> = () => {
-      log.push("post");
-      return Promise.resolve({ decision: "approve" });
-    };
+    registerHook<PreToolUsePayload>({
+      id: makeHookId("system/pre_tool_use/test-order"),
+      layer: "system",
+      event: HOOK_EVENT.PreToolUse,
+      matcher: () => true,
+      decision: () => {
+        log.push("pre");
+        return Promise.resolve({ decision: "approve" });
+      },
+    });
+    registerHook<PostToolUsePayload>({
+      id: makeHookId("system/post_tool_use/test-order"),
+      layer: "system",
+      event: HOOK_EVENT.PostToolUse,
+      matcher: () => true,
+      decision: () => {
+        log.push("post");
+        return Promise.resolve({ decision: "approve" });
+      },
+    });
 
     let callCount = 0;
     const model: ModelClient = {
@@ -513,14 +532,7 @@ describe("hook seams — call order and payloads", () => {
     };
 
     const result = await runTurnLoop(
-      {
-        sql,
-        clock,
-        model,
-        tools: spyRegistry,
-        maxTurns: 10,
-        hooks: { preToolUse: preStub, postToolUse: postStub },
-      },
+      { sql, clock, model, tools: spyRegistry, maxTurns: 10 },
       { ...ids, systemPrompt: "sys", initialMessages: baseInput },
     );
 
@@ -528,13 +540,19 @@ describe("hook seams — call order and payloads", () => {
     expect(log).toEqual(["pre", "invoke", "post"]);
   });
 
-  test("preToolUse receives correct payload fields", async () => {
+  test("pre_tool_use hook receives correct payload fields", async () => {
     const captured: PreToolUsePayload[] = [];
 
-    const preStub = (p: PreToolUsePayload): Promise<HookDecision> => {
-      captured.push(p);
-      return Promise.resolve({ decision: "approve" });
-    };
+    registerHook<PreToolUsePayload>({
+      id: makeHookId("system/pre_tool_use/capture-payload"),
+      layer: "system",
+      event: HOOK_EVENT.PreToolUse,
+      matcher: () => true,
+      decision: (p) => {
+        captured.push(p);
+        return Promise.resolve({ decision: "approve" });
+      },
+    });
 
     let callCount = 0;
     const model: ModelClient = {
@@ -548,20 +566,13 @@ describe("hook seams — call order and payloads", () => {
     const tools = new InMemoryToolRegistry([echoTool]);
 
     await runTurnLoop(
-      {
-        sql,
-        clock,
-        model,
-        tools,
-        maxTurns: 10,
-        hooks: { preToolUse: preStub, postToolUse: approveStub },
-      },
+      { sql, clock, model, tools, maxTurns: 10 },
       { ...ids, systemPrompt: "sys", initialMessages: baseInput },
     );
 
     expect(captured).toHaveLength(1);
     const p = captured[0];
-    assert(p !== undefined, "preToolUse must have been called");
+    assert(p !== undefined, "pre hook decision must have been called");
     expect(p.toolUseId as string).toBe("tool-use-id-42");
     expect(p.toolName).toBe("echo");
     expect(p.toolInput).toEqual({ text: "hello" });
@@ -572,13 +583,19 @@ describe("hook seams — call order and payloads", () => {
     expect(p.turnId.length).toBeGreaterThan(0);
   });
 
-  test("postToolUse receives correct payload fields including outcome=invoked", async () => {
+  test("post_tool_use hook receives correct payload fields including outcome=invoked", async () => {
     const captured: PostToolUsePayload[] = [];
 
-    const postStub = (p: PostToolUsePayload): Promise<HookDecision> => {
-      captured.push(p);
-      return Promise.resolve({ decision: "approve" });
-    };
+    registerHook<PostToolUsePayload>({
+      id: makeHookId("system/post_tool_use/capture-payload"),
+      layer: "system",
+      event: HOOK_EVENT.PostToolUse,
+      matcher: () => true,
+      decision: (p) => {
+        captured.push(p);
+        return Promise.resolve({ decision: "approve" });
+      },
+    });
 
     let callCount = 0;
     const model: ModelClient = {
@@ -592,20 +609,13 @@ describe("hook seams — call order and payloads", () => {
     const tools = new InMemoryToolRegistry([echoTool]);
 
     await runTurnLoop(
-      {
-        sql,
-        clock,
-        model,
-        tools,
-        maxTurns: 10,
-        hooks: { preToolUse: approveStub, postToolUse: postStub },
-      },
+      { sql, clock, model, tools, maxTurns: 10 },
       { ...ids, systemPrompt: "sys", initialMessages: baseInput },
     );
 
     expect(captured).toHaveLength(1);
     const p = captured[0];
-    assert(p !== undefined, "postToolUse must have been called");
+    assert(p !== undefined, "post hook decision must have been called");
     expect(p.toolUseId as string).toBe("tu-99");
     expect(p.toolName).toBe("echo");
     expect(p.outcome).toBe("invoked");
@@ -614,12 +624,19 @@ describe("hook seams — call order and payloads", () => {
     expect(p.tenantId).toBe(ids.tenantId);
   });
 
-  test("postToolUse outcome=tool_error when tool returns error", async () => {
+  test("post_tool_use outcome=tool_error when tool returns error", async () => {
     const captured: PostToolUsePayload[] = [];
-    const postStub = (p: PostToolUsePayload): Promise<HookDecision> => {
-      captured.push(p);
-      return Promise.resolve({ decision: "approve" });
-    };
+
+    registerHook<PostToolUsePayload>({
+      id: makeHookId("system/post_tool_use/capture-outcome"),
+      layer: "system",
+      event: HOOK_EVENT.PostToolUse,
+      matcher: () => true,
+      decision: (p) => {
+        captured.push(p);
+        return Promise.resolve({ decision: "approve" });
+      },
+    });
 
     const errorRegistry: ToolRegistry = {
       list: (): readonly ToolSchema[] => [{ name: "boom", inputSchema: { type: "object" } }],
@@ -644,14 +661,7 @@ describe("hook seams — call order and payloads", () => {
     };
 
     await runTurnLoop(
-      {
-        sql,
-        clock,
-        model,
-        tools: errorRegistry,
-        maxTurns: 10,
-        hooks: { preToolUse: approveStub, postToolUse: postStub },
-      },
+      { sql, clock, model, tools: errorRegistry, maxTurns: 10 },
       { ...ids, systemPrompt: "sys", initialMessages: baseInput },
     );
 
@@ -660,17 +670,34 @@ describe("hook seams — call order and payloads", () => {
   });
 });
 
-describe("hook seams — relay.hook.evaluation_total counter", () => {
+describe("hook registry — relay.hook.evaluation_total counter", () => {
   let fixture: MetricFixture;
 
   beforeEach(() => {
+    __clearRegistryForTesting();
     fixture = installMetricFixture();
     clock = new FakeClock(1_000_000);
     ids = makeIds();
     sql = makeFakeSql(ids.tenantId);
+    // Register one approve hook per event so evaluateHook is called and emits the counter.
+    registerHook<PreToolUsePayload>({
+      id: makeHookId("system/pre_tool_use/counter-approve"),
+      layer: "system",
+      event: HOOK_EVENT.PreToolUse,
+      matcher: () => true,
+      decision: () => Promise.resolve({ decision: "approve" }),
+    });
+    registerHook<PostToolUsePayload>({
+      id: makeHookId("system/post_tool_use/counter-approve"),
+      layer: "system",
+      event: HOOK_EVENT.PostToolUse,
+      matcher: () => true,
+      decision: () => Promise.resolve({ decision: "approve" }),
+    });
   });
 
   afterEach(async () => {
+    __clearRegistryForTesting();
     await uninstallMetricFixture();
   });
 

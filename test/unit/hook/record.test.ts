@@ -4,10 +4,10 @@ import type { HookDecide, HookDecision, HookMatcher, Hook } from "../../../src/h
 import { HOOK_EVENT } from "../../../src/hook/types.ts";
 import { MAX_DENY_REASON_CHARS } from "../../../src/hook/limits.ts";
 import { evaluateHookRecord } from "../../../src/hook/record.ts";
-import { HookId } from "../../../src/ids.ts";
+import { HookRecordId } from "../../../src/ids.ts";
 
 const EVENT = HOOK_EVENT.SessionStart;
-const _hookIdResult = HookId.parse("00000000-0000-4000-8000-000000000001");
+const _hookIdResult = HookRecordId.parse("00000000-0000-4000-8000-000000000001");
 assert(_hookIdResult.ok, "test setup: invalid HOOK_ID");
 const HOOK_ID = _hookIdResult.value;
 

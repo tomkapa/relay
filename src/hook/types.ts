@@ -1,6 +1,6 @@
-// Shared hook types used by stubs, evaluator (RELAY-138), and call sites.
+// Shared hook types used by the registry, evaluator, and call sites.
 
-import type { AgentId, HookId, SessionId, TenantId, ToolUseId, TurnId } from "../ids.ts";
+import type { AgentId, HookRecordId, SessionId, TenantId, ToolUseId, TurnId } from "../ids.ts";
 
 // Canonical three-variant decision. SPEC §Composition — modify is a first-class outcome.
 // `modify` carries a replacement payload; how modify outputs chain is RELAY-139's concern.
@@ -66,8 +66,10 @@ export type HookDecide<TPayload> = (
 ) => HookDecision<TPayload> | Promise<HookDecision<TPayload>>;
 
 // Canonical hook record. Stored in the registry (RELAY-138) keyed by event.
+// id is HookRecordId (UUID or system/<event>/<name>) — not HookId which is UUID-only.
+// HookId stays for the future hook_rules FK (RELAY-225).
 export type Hook<TPayload> = {
-  readonly id: HookId;
+  readonly id: HookRecordId;
   readonly layer: HookLayer;
   readonly event: HookEvent;
   readonly matcher: HookMatcher<TPayload>;
@@ -79,8 +81,3 @@ export type Hook<TPayload> = {
 export type HookEvaluation<TPayload> =
   | { readonly matched: false }
   | { readonly matched: true; readonly decision: HookDecision<TPayload> };
-
-export type HookSeams = {
-  readonly preToolUse: (payload: PreToolUsePayload) => Promise<HookDecision>;
-  readonly postToolUse: (payload: PostToolUsePayload) => Promise<HookDecision>;
-};
