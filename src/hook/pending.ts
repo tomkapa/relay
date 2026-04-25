@@ -93,17 +93,21 @@ export async function drainPendingSystemMessages(
   input: DrainInput,
 ): Promise<Result<readonly DrainedRow[], DrainPendingError>> {
   try {
+    // CTE wraps UPDATE RETURNING so ORDER BY can be applied — RETURNING alone has no order guarantee.
     const rows = await sql<PendingDbRow[]>`
-      UPDATE pending_system_messages
-      SET consumed_at = now()
-      WHERE id IN (
-        SELECT id FROM pending_system_messages
-        WHERE target_session_id = ${input.targetSessionId}
-          AND consumed_at IS NULL
-        ORDER BY created_at
-        LIMIT ${MAX_PENDING_MESSAGES_PER_TURN}
+      WITH updated AS (
+        UPDATE pending_system_messages
+        SET consumed_at = now()
+        WHERE id IN (
+          SELECT id FROM pending_system_messages
+          WHERE target_session_id = ${input.targetSessionId}
+            AND consumed_at IS NULL
+          ORDER BY created_at
+          LIMIT ${MAX_PENDING_MESSAGES_PER_TURN}
+        )
+        RETURNING id, content, hook_audit_id, created_at, consumed_at
       )
-      RETURNING id, content, hook_audit_id, created_at, consumed_at
+      SELECT id, content, hook_audit_id, created_at, consumed_at FROM updated ORDER BY created_at
     `;
 
     assert(
