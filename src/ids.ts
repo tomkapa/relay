@@ -17,6 +17,7 @@ export type MemoryId = Brand<string, "MemoryId">;
 export type HookId = Brand<string, "HookId">;
 export type HookRecordId = Brand<string, "HookRecordId">;
 export type HookAuditId = Brand<string, "HookAuditId">;
+export type HookConfigSnapshotId = Brand<string, "HookConfigSnapshotId">;
 export type PendingSystemMessageId = Brand<string, "PendingSystemMessageId">;
 export type TenantId = Brand<string, "TenantId">;
 export type UserId = Brand<string, "UserId">;
@@ -79,6 +80,10 @@ export const HookRecordId = {
 };
 export const HookAuditId = {
   parse: (raw: string): Result<HookAuditId, IdParseError> => parseUuid<"HookAuditId">(raw),
+};
+export const HookConfigSnapshotId = {
+  parse: (raw: string): Result<HookConfigSnapshotId, IdParseError> =>
+    parseUuid<"HookConfigSnapshotId">(raw),
 };
 export const PendingSystemMessageId = {
   parse: (raw: string): Result<PendingSystemMessageId, IdParseError> =>
