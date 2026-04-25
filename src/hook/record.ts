@@ -3,13 +3,14 @@
 // No telemetry, no timeout — both are the caller's responsibility (RELAY-136, RELAY-138).
 
 import { assert, assertNever } from "../core/assert.ts";
+import type { PayloadFor } from "./payloads.ts";
 import { MAX_DENY_REASON_CHARS } from "./limits.ts";
-import type { Hook, HookDecision, HookEvaluation } from "./types.ts";
+import type { Hook, HookDecision, HookEvaluation, HookEvent } from "./types.ts";
 
-export async function evaluateHookRecord<TPayload>(
-  hook: Hook<TPayload>,
-  payload: TPayload,
-): Promise<HookEvaluation<TPayload>> {
+export async function evaluateHookRecord<E extends HookEvent>(
+  hook: Hook<E>,
+  payload: PayloadFor<E>,
+): Promise<HookEvaluation<PayloadFor<E>>> {
   const matched = hook.matcher(payload);
 
   // A matcher returning undefined/"yes"/etc. is a programmer error — crash loudly
@@ -29,10 +30,7 @@ export async function evaluateHookRecord<TPayload>(
   return { matched: true, decision };
 }
 
-function assertDecisionShape<TPayload>(
-  decision: HookDecision<TPayload>,
-  hookId: Hook<TPayload>["id"],
-): void {
+function assertDecisionShape<TPayload>(decision: HookDecision<TPayload>, hookId: Hook["id"]): void {
   switch (decision.decision) {
     case "approve":
       return;

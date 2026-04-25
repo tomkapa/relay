@@ -35,7 +35,7 @@ import type {
   Turn,
   TurnLoopError,
 } from "./turn.ts";
-import type { PostToolUsePayload, PreToolUsePayload } from "../hook/types.ts";
+import type { PostToolUsePayload, PreToolUsePayload } from "../hook/payloads.ts";
 import { HOOK_EVENT } from "../hook/types.ts";
 import { runHooks } from "../hook/run.ts";
 import { drainPendingSystemMessages } from "../hook/pending.ts";
@@ -176,7 +176,7 @@ async function dispatchOneBlock(
     toolName: block.name,
     toolInput: block.input,
   };
-  const preDecision = await runHooks<PreToolUsePayload>(
+  const preDecision = await runHooks(
     sql,
     clock,
     {
@@ -234,8 +234,11 @@ async function dispatchOneBlock(
     toolUseId: block.id,
     toolName: block.name,
     outcome: toolResult.ok ? "invoked" : "tool_error",
+    toolResult: toolResult.ok
+      ? { kind: "ok", content: toolResult.content }
+      : { kind: "error", errorMessage: toolResult.errorMessage },
   };
-  const postDecision = await runHooks<PostToolUsePayload>(
+  const postDecision = await runHooks(
     sql,
     clock,
     {

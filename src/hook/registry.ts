@@ -14,15 +14,16 @@ import type { Hook, HookEvent, HookLayer } from "./types.ts";
 // Exported because runHooks and tests both depend on it — one source of truth.
 export const LAYER_ORDER: readonly HookLayer[] = Object.freeze(["system", "organization", "agent"]);
 
+// Bucket type stores Hook[] (Hook<HookEvent>) for heterogeneous storage across events.
+// Type discipline is enforced at registerHook<E> call sites; getRulesForEvent<E> narrows on read.
 // Pre-allocate all three layer maps at module init. Static allocation per CLAUDE.md §9.
-// Org and agent buckets are always empty in MVP production until RELAY-141 + RELAY-225 land.
-const registry = new Map<HookLayer, Map<HookEvent, Hook<unknown>[]>>([
-  ["system", new Map<HookEvent, Hook<unknown>[]>()],
-  ["organization", new Map<HookEvent, Hook<unknown>[]>()],
-  ["agent", new Map<HookEvent, Hook<unknown>[]>()],
+const registry = new Map<HookLayer, Map<HookEvent, Hook[]>>([
+  ["system", new Map<HookEvent, Hook[]>()],
+  ["organization", new Map<HookEvent, Hook[]>()],
+  ["agent", new Map<HookEvent, Hook[]>()],
 ]);
 
-export function registerHook<P>(hook: Hook<P>): void {
+export function registerHook<E extends HookEvent>(hook: Hook<E>): void {
   assert(LAYER_ORDER.includes(hook.layer), "registerHook: unknown layer", {
     hookId: hook.id,
     layer: hook.layer,
@@ -45,14 +46,20 @@ export function registerHook<P>(hook: Hook<P>): void {
     { hookId: hook.id, layer: hook.layer, event: hook.event },
   );
 
-  // Cast to Hook<unknown> for heterogeneous storage. Payload type discipline is enforced
-  // at the call site. RELAY-140 will replace this with per-event-typed sub-maps.
-  bucket.push(hook as Hook<unknown>);
+  // Cast from Hook<E> to Hook<HookEvent> for heterogeneous storage.
+  // Sound by registration discipline: registerHook<E> only inserts into hook.event's bucket,
+  // and the literal E is enforced at the call site, so cross-event insertion fails to compile.
+  bucket.push(hook as unknown as Hook);
   layerMap.set(hook.event, bucket);
 }
 
-export function getRulesForEvent(layer: HookLayer, event: HookEvent): readonly Hook<unknown>[] {
-  return registry.get(layer)?.get(event) ?? [];
+// Read a bucket narrowed to Hook<E>. The cast is sound by the same registration discipline:
+// only registerHook<E> inserts into the E bucket, and event tag is the key.
+export function getRulesForEvent<E extends HookEvent>(
+  layer: HookLayer,
+  event: E,
+): readonly Hook<E>[] {
+  return (registry.get(layer)?.get(event) ?? []) as unknown as readonly Hook<E>[];
 }
 
 // Test-only — clears all three layer maps between test cases so tests are hermetic.

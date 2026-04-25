@@ -1,7 +1,7 @@
 // Integration tests for closeSession and isClosed. Real Postgres per CLAUDE.md §3.
 // Skipped when INTEGRATION_DATABASE_URL is unset so `bun test` stays green locally.
 
-import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import postgres, { type Sql } from "postgres";
 import { assert } from "../../../src/core/assert.ts";
@@ -9,16 +9,14 @@ import { FakeClock } from "../../../src/core/clock.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
 import {
   AgentId as AgentIdParser,
+  HookRecordId,
   SessionId as SessionIdParser,
   TenantId as TenantIdParser,
 } from "../../../src/ids.ts";
 import type { AgentId, SessionId, TenantId } from "../../../src/ids.ts";
-import {
-  closeSession,
-  isClosed,
-  type HookResult,
-  type SessionEndPayload,
-} from "../../../src/session/close.ts";
+import { closeSession, isClosed } from "../../../src/session/close.ts";
+import { __clearRegistryForTesting, registerHook } from "../../../src/hook/registry.ts";
+import { HOOK_EVENT } from "../../../src/hook/types.ts";
 import { DB_URL, HOOK_TIMEOUT_MS, MIGRATIONS_DIR, describeOrSkip, resetDb } from "../helpers.ts";
 
 let sqlRef: Sql | undefined;
@@ -57,6 +55,12 @@ async function insertSession(sql: Sql, agentId: AgentId, tenantId: TenantId): Pr
   return r.value;
 }
 
+function makeHookId(tag: string) {
+  const r = HookRecordId.parse(tag);
+  assert(r.ok, "fixture: invalid HookRecordId");
+  return r.value;
+}
+
 beforeAll(async () => {
   if (!DB_URL) return;
   const s = postgres(DB_URL, { max: 4, idle_timeout: 2 });
@@ -74,6 +78,11 @@ afterAll(async () => {
 beforeEach(async () => {
   if (!DB_URL) return;
   await requireSql()`TRUNCATE TABLE agents CASCADE`;
+  __clearRegistryForTesting();
+});
+
+afterEach(() => {
+  __clearRegistryForTesting();
 });
 
 describeOrSkip("closeSession (integration)", () => {
@@ -225,22 +234,28 @@ describeOrSkip("closeSession (integration)", () => {
   );
 
   test(
-    "hook deny does not unwind close — closed_at is committed",
+    "hook deny does not unwind close — closed_at is committed and audit row exists",
     async () => {
       const sql = requireSql();
       const clock = new FakeClock(Date.now());
       const tenantId = makeTenant();
       const agentId = await insertAgent(sql, tenantId);
       const sessionId = await insertSession(sql, agentId, tenantId);
-      const denyHook: (payload: SessionEndPayload) => Promise<HookResult> = () =>
-        Promise.resolve({ decision: "deny", reason: "test policy" });
 
-      const result = await closeSession(
-        sql,
-        clock,
-        { sessionId, agentId, tenantId, reason: { kind: "end_turn" } },
-        denyHook,
-      );
+      registerHook({
+        id: makeHookId("system/session_end/test-deny"),
+        layer: "system",
+        event: HOOK_EVENT.SessionEnd,
+        matcher: () => true,
+        decision: () => Promise.resolve({ decision: "deny", reason: "test policy" }),
+      });
+
+      const result = await closeSession(sql, clock, {
+        sessionId,
+        agentId,
+        tenantId,
+        reason: { kind: "end_turn" },
+      });
 
       expect(result.ok).toBe(true);
       if (!result.ok) return;
@@ -250,6 +265,11 @@ describeOrSkip("closeSession (integration)", () => {
         SELECT closed_at FROM sessions WHERE id = ${sessionId}
       `;
       expect(rows[0]?.closed_at).not.toBeNull();
+
+      // Verify audit row was written
+      const auditRows = await sql<{ decision: string }[]>`SELECT decision FROM hook_audit`;
+      expect(auditRows.length).toBe(1);
+      expect(auditRows[0]?.decision).toBe("deny");
     },
     HOOK_TIMEOUT_MS,
   );

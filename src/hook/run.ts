@@ -10,27 +10,28 @@ import type { AgentId, SessionId, TenantId, TurnId } from "../ids.ts";
 import { Attr, SpanName, counter, emit, withSpan } from "../telemetry/otel.ts";
 import { evaluateHook } from "./evaluate.ts";
 import { MAX_HOOKS_PER_EVENT } from "./limits.ts";
+import type { PayloadFor } from "./payloads.ts";
 import { evaluateHookRecord } from "./record.ts";
 import { LAYER_ORDER, getRulesForEvent } from "./registry.ts";
 import type { Hook, HookDecision, HookEvent, HookLayer } from "./types.ts";
 
 export type AggregateDecision<P> = HookDecision<P>;
 
-export type RunHooksContext = {
+export type RunHooksContext<E extends HookEvent> = {
   readonly tenantId: TenantId;
   readonly agentId: AgentId;
   readonly sessionId: SessionId | null;
   readonly turnId: TurnId | null;
   readonly toolName: string | null;
-  readonly event: HookEvent;
+  readonly event: E;
 };
 
-export async function runHooks<P>(
+export async function runHooks<E extends HookEvent>(
   tx: Sql | TransactionSql,
   clock: Clock,
-  ctx: RunHooksContext,
-  initialPayload: P,
-): Promise<AggregateDecision<P>> {
+  ctx: RunHooksContext<E>,
+  initialPayload: PayloadFor<E>,
+): Promise<AggregateDecision<PayloadFor<E>>> {
   // Fast path: all layers empty → approve with no span, no audit rows.
   // In MVP this is the common path — org/agent are always empty and many events
   // have no system rules registered.
@@ -49,8 +50,8 @@ export async function runHooks<P>(
       ...(ctx.toolName !== null ? { [Attr.ToolName]: ctx.toolName } : {}),
     },
     async () => {
-      let runningPayload: P = initialPayload;
-      let aggregate: AggregateDecision<P> = { decision: "approve" };
+      let runningPayload: PayloadFor<E> = initialPayload;
+      let aggregate: AggregateDecision<PayloadFor<E>> = { decision: "approve" };
 
       // Outer loop: SPEC-mandated layer order. Deny anywhere short-circuits all remaining layers.
       // Modify threads one running payload across all layers — layer boundaries are invisible to
@@ -110,21 +111,19 @@ export async function runHooks<P>(
 // Per-layer inner loop. Returns the bucket's aggregate decision.
 // Factored from the outer loop so RELAY-141 can swap how `rules` is sourced for
 // org/agent layers (pinned config snapshot) without touching composition logic.
-async function runOneLayer<P>(
+async function runOneLayer<E extends HookEvent>(
   tx: Sql | TransactionSql,
   clock: Clock,
   layer: HookLayer,
-  ctx: RunHooksContext,
-  rules: readonly Hook<unknown>[],
-  initialPayload: P,
-): Promise<HookDecision<P>> {
-  let runningPayload: P = initialPayload;
+  ctx: RunHooksContext<E>,
+  rules: readonly Hook<E>[],
+  initialPayload: PayloadFor<E>,
+): Promise<HookDecision<PayloadFor<E>>> {
+  let runningPayload: PayloadFor<E> = initialPayload;
   let modified = false;
 
   for (const rule of rules) {
-    // Cast: registry stores Hook<unknown>; caller's P must match the event type.
-    // RELAY-140 per-event-typed sub-maps will erase this cast.
-    const evalResult = await evaluateHookRecord(rule as unknown as Hook<P>, runningPayload);
+    const evalResult = await evaluateHookRecord(rule, runningPayload);
 
     if (!evalResult.matched) {
       counter("relay.hook.matcher_rejected_total").add(1, {
@@ -136,7 +135,9 @@ async function runOneLayer<P>(
       continue; // matcher rejected → no audit row (SPEC §Audit)
     }
 
-    // Side-effects: audit row + optional pending system message (deny + session known).
+    // evaluateHook still uses HookDecision<unknown> — the cast is sound by registration
+    // discipline: the decision function returns HookDecision<PayloadFor<E>>, and the
+    // modify path below recovers the typed payload. RELAY-136 stays unchanged.
     const decision = await evaluateHook(tx, clock, {
       hookId: rule.id,
       layer,
@@ -159,7 +160,7 @@ async function runOneLayer<P>(
         assert(decision.payload !== undefined, "runOneLayer: modify must carry payload", {
           hookId: rule.id,
         });
-        runningPayload = (decision as HookDecision<P> & { decision: "modify" }).payload;
+        runningPayload = (decision as HookDecision<PayloadFor<E>> & { decision: "modify" }).payload;
         modified = true;
         break;
       }

@@ -10,7 +10,6 @@ import { assert } from "../../../src/core/assert.ts";
 import { FakeClock } from "../../../src/core/clock.ts";
 import { migrate } from "../../../src/db/migrate-apply.ts";
 import { __clearRegistryForTesting, registerHook } from "../../../src/hook/registry.ts";
-import type { PreToolUsePayload } from "../../../src/hook/types.ts";
 import { HOOK_EVENT } from "../../../src/hook/types.ts";
 import { AgentId, HookRecordId, SessionId, TenantId, ToolUseId } from "../../../src/ids.ts";
 import type {
@@ -94,7 +93,7 @@ describeOrSkip("demo-deny: pre_tool_use deny → audit → pending → synthetic
       const denyIdResult = HookRecordId.parse("system/pre_tool_use/demo-deny");
       assert(denyIdResult.ok, "demo-deny: hook id parse failed");
 
-      registerHook<PreToolUsePayload>({
+      registerHook({
         id: denyIdResult.value,
         layer: "system",
         event: HOOK_EVENT.PreToolUse,
