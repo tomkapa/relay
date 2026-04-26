@@ -54,11 +54,12 @@ import { runHooks } from "../hook/run.ts";
 import { snapshotHookConfig } from "../hook/snapshot.ts";
 import { HOOK_EVENT } from "../hook/types.ts";
 import type { Message } from "../session/turn.ts";
-import { closeSession, markSessionTerminal } from "../session/close.ts";
+import { closeSession } from "../session/close.ts";
 import type { SessionCloseError, SessionEndReason } from "../session/close.ts";
 import { quiesceSession } from "../session/quiesce.ts";
 import type { SessionQuiesceError } from "../session/quiesce.ts";
 import type { TranscriptEntry } from "../session/transcript.ts";
+import { MAX_CASCADE_SESSIONS } from "../session/limits.ts";
 
 export type HandlerDeps = {
   readonly sql: Sql;
@@ -848,13 +849,31 @@ async function handleInboundMessage(
   );
 }
 
-// Maximum descendants visited in one cascade_close pass. Prevents unbounded BFS
-// on a pathological chain depth.
-const MAX_CASCADE_SESSIONS = 512;
+// One recursive CTE finds every open descendant of the root; two batch UPDATEs
+// terminate them and orphan their pending-ask ledger rows. SessionEnd is NOT
+// fired on cascaded children — cascade is a silent internal sweep.
+async function findOpenDescendants(
+  sql: Sql,
+  rootId: SessionIdBrand,
+  tenantId: TenantIdBrand,
+): Promise<readonly string[]> {
+  const rows = await sql<{ readonly id: string }[]>`
+    WITH RECURSIVE descendants AS (
+      SELECT id FROM sessions
+      WHERE parent_session_id = ${rootId}
+        AND tenant_id = ${tenantId}
+        AND closed_at IS NULL
+      UNION ALL
+      SELECT s.id FROM sessions s
+      JOIN descendants d ON s.parent_session_id = d.id
+      WHERE s.tenant_id = ${tenantId}
+        AND s.closed_at IS NULL
+    )
+    SELECT id FROM descendants
+  `;
+  return rows.map((r) => r.id);
+}
 
-// Iterative BFS cascade close — no recursion (CLAUDE.md §4).
-// Reads direct children of each session in queue, marks each terminal.
-// SessionEnd is NOT fired on children — cascade is a silent internal sweep.
 async function handleCascadeClose(
   deps: HandlerDeps,
   item: WorkItem,
@@ -873,50 +892,33 @@ async function handleCascadeClose(
 
       const rootId = rootSessionIdResult.value;
       const now = new Date(deps.clock.now());
-      const queue: SessionIdBrand[] = [rootId];
-      let visited = 0;
+      const ids = await findOpenDescendants(deps.sql, rootId, item.tenantId);
 
-      assert(queue.length > 0, "handleCascadeClose: queue must start non-empty");
+      assert(ids.length <= MAX_CASCADE_SESSIONS, "handleCascadeClose: cascade cap exceeded", {
+        count: ids.length,
+      });
 
-      while (queue.length > 0) {
-        const sessionId = queue.shift();
-        assert(sessionId !== undefined, "handleCascadeClose: shifted undefined from queue");
-        visited++;
-        assert(visited <= MAX_CASCADE_SESSIONS, "handleCascadeClose: cascade cap exceeded", {
-          visited,
-        });
-
-        // Mark terminal — skip root (already closed by closeSession).
-        if (sessionId !== rootId) {
-          await markSessionTerminal(deps.sql, sessionId, now);
-        }
-
-        // Find open children and enqueue them for BFS.
-        const childRows = await deps.sql<{ readonly id: string }[]>`
-          SELECT id FROM sessions
-          WHERE parent_session_id = ${sessionId}
-            AND tenant_id = ${item.tenantId}
-            AND closed_at IS NULL
+      if (ids.length > 0) {
+        await deps.sql`
+          UPDATE sessions
+          SET closed_at = ${now}, updated_at = ${now}
+          WHERE id = ANY(${ids}::uuid[]) AND closed_at IS NULL
         `;
-
-        for (const child of childRows) {
-          const childIdResult = SessionId.parse(child.id);
-          assert(childIdResult.ok, "handleCascadeClose: invalid child session id from DB", {
-            id: child.id,
-          });
-          queue.push(childIdResult.value);
-        }
+        await deps.sql`
+          UPDATE session_pending_asks
+          SET resolved_at = ${now}, resolved_kind = 'cascade_orphan'
+          WHERE child_session_id = ANY(${ids}::uuid[]) AND resolved_at IS NULL
+        `;
+        counter("relay.session.cascade_closed_total").add(ids.length, {
+          [Attr.TenantId]: item.tenantId,
+        });
       }
 
-      counter("relay.session.cascade_closed_total").add(visited, {
-        [Attr.TenantId]: item.tenantId,
-      });
       emit("INFO", "session.cascade.complete", {
         [Attr.TenantId]: item.tenantId,
         [Attr.SessionId]: rootId,
-        [Attr.CascadeDepth]: visited,
+        [Attr.CascadeDepth]: ids.length,
       });
-
       return ok(undefined);
     },
   );

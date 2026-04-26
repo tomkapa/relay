@@ -7,24 +7,24 @@ import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
 import {
-  SessionId,
   TenantId,
   ToolUseId,
-  WorkItemId,
   type AgentId,
   type SessionId as SessionIdBrand,
   type TenantId as TenantIdBrand,
   type ToolUseId as ToolUseIdBrand,
 } from "../ids.ts";
-import { idempotencyKeyForAskReply, idempotencyKeyToUuid } from "../core/idempotency.ts";
 import { Attr, SpanName, counter, emit, withSpan } from "../telemetry/otel.ts";
 import { runHooks } from "../hook/run.ts";
 import { snapshotHookConfig } from "../hook/snapshot.ts";
 import { HOOK_EVENT } from "../hook/types.ts";
-import { readFinalTurnResponse } from "./read-final-turn.ts";
-import { writeInboundMessage } from "../trigger/inbound/inbound-ops.ts";
 import { enqueue } from "../work_queue/queue-ops.ts";
 import { markCascadeOrphaned } from "./pending-asks.ts";
+import {
+  readChildFinalText,
+  routeAskReplyToParent,
+  type AskReplyRouteDrop,
+} from "./ask-reply-route.ts";
 
 // Close reason tags. Additive union — future tasks (abandoned-after-deadline, admin-force-close)
 // extend here. RELAY-93 adds nothing: suspend is NOT a close.
@@ -187,26 +187,9 @@ export async function closeSession(
   );
 }
 
-function dropLateReply(
-  childSessionId: SessionIdBrand,
-  tenantId: TenantIdBrand,
-  parentSessionId: string,
-  reason: "parent_not_found" | "parent_closed",
-): void {
-  counter("relay.session.late_reply_dropped_total").add(1, {
-    [Attr.TenantId]: tenantId,
-    [Attr.DropReason]: reason,
-  });
-  emit("WARN", `session.ask_reply.${reason}`, {
-    [Attr.SessionId]: childSessionId,
-    [Attr.TenantId]: tenantId,
-    parent_session_id: parentSessionId,
-  });
-}
-
 // Routes the child's final assistant text back to the parent as an inbound message.
 // Called after the SessionEnd hook completes. Failures are caught and logged — they must
-// NOT unwind the close. RELAY-144 §9.
+// NOT unwind the close.
 async function routeAskReplyOnClose(
   sql: Sql,
   clock: Clock,
@@ -219,81 +202,64 @@ async function routeAskReplyOnClose(
   },
 ): Promise<void> {
   try {
-    // 1. Read final assistant text from child session.
-    const finalResult = await readFinalTurnResponse(sql, spec.childSessionId);
-    const finalText =
-      finalResult.ok && finalResult.value.text.length > 0
-        ? finalResult.value.text
-        : "<no response — session ended without text>";
-
-    // 2. Check parent session status.
-    const parentRows = await sql<{ closed_at: Date | null }[]>`
-      SELECT closed_at FROM sessions WHERE id = ${spec.parentSessionId} AND tenant_id = ${spec.tenantId}
-    `;
-    if (parentRows.length === 0) {
-      dropLateReply(spec.childSessionId, spec.tenantId, spec.parentSessionId, "parent_not_found");
-      return;
-    }
-    const parentRow = parentRows[0];
-    assert(parentRow !== undefined, "routeAskReplyOnClose: parentRow must exist");
-    if (parentRow.closed_at !== null) {
-      dropLateReply(spec.childSessionId, spec.tenantId, spec.parentSessionId, "parent_closed");
-      return;
-    }
-
-    const iKey = idempotencyKeyForAskReply({
-      childSessionId: spec.childSessionId,
-      parentToolUseId: spec.parentToolUseId,
-    });
-    const workItemIdStr = idempotencyKeyToUuid(iKey);
-    const workItemIdResult = WorkItemId.parse(workItemIdStr);
-    assert(
-      workItemIdResult.ok,
-      "routeAskReplyOnClose: idempotencyKeyToUuid invalid UUID for work item",
+    const finalText = await readChildFinalText(
+      sql,
+      spec.childSessionId,
+      "<no response — session ended without text>",
     );
-    const syntheticWorkItemId = workItemIdResult.value;
 
-    const now = new Date(clock.now());
+    const result = await routeAskReplyToParent(
+      sql,
+      {
+        childSessionId: spec.childSessionId,
+        parentSessionId: spec.parentSessionId,
+        parentToolUseId: spec.parentToolUseId,
+        tenantId: spec.tenantId,
+        childAgentId: spec.childAgentId,
+        now: new Date(clock.now()),
+        noResponseFallback: "<no response — session ended without text>",
+      },
+      finalText,
+    );
 
-    const parentSessResult = SessionId.parse(spec.parentSessionId);
-    assert(parentSessResult.ok, "routeAskReplyOnClose: invalid parentSessionId", {
-      id: spec.parentSessionId,
-    });
-
-    const inboundResult = await writeInboundMessage(sql, {
-      tenantId: spec.tenantId,
-      targetSessionId: parentSessResult.value,
-      sender: { type: "agent", id: spec.childAgentId },
-      content: finalText,
-      receivedAt: now,
-      sourceWorkItemId: syntheticWorkItemId,
-      sourceToolUseId: spec.parentToolUseId,
-    });
-    if (!inboundResult.ok) {
-      emit("WARN", "session.ask_reply.write_inbound_failed", {
-        [Attr.SessionId]: spec.childSessionId,
-        error: inboundResult.error.kind,
-      });
-      return;
-    }
-
-    const workResult = await enqueue(sql, {
-      tenantId: spec.tenantId,
-      kind: "inbound_message",
-      payloadRef: inboundResult.value,
-      scheduledAt: now,
-    });
-    if (!workResult.ok) {
-      emit("WARN", "session.ask_reply.enqueue_failed", {
-        [Attr.SessionId]: spec.childSessionId,
-        error: workResult.error.kind,
-      });
-    }
+    if (!result.ok) logCloseRouteDrop(spec.childSessionId, spec.tenantId, result.error);
   } catch (e) {
     emit("WARN", "session.ask_reply.route_failed", {
       [Attr.SessionId]: spec.childSessionId,
       error: (e as Error).message,
     });
+  }
+}
+
+function logCloseRouteDrop(
+  childSessionId: SessionIdBrand,
+  tenantId: TenantIdBrand,
+  drop: AskReplyRouteDrop,
+): void {
+  switch (drop.kind) {
+    case "parent_not_found":
+    case "parent_closed":
+      counter("relay.session.late_reply_dropped_total").add(1, {
+        [Attr.TenantId]: tenantId,
+        [Attr.DropReason]: drop.kind,
+      });
+      emit("WARN", `session.ask_reply.${drop.kind}`, {
+        [Attr.SessionId]: childSessionId,
+        [Attr.TenantId]: tenantId,
+      });
+      return;
+    case "write_inbound_failed":
+      emit("WARN", "session.ask_reply.write_inbound_failed", {
+        [Attr.SessionId]: childSessionId,
+        error: drop.detail,
+      });
+      return;
+    case "enqueue_failed":
+      emit("WARN", "session.ask_reply.enqueue_failed", {
+        [Attr.SessionId]: childSessionId,
+        error: drop.detail,
+      });
+      return;
   }
 }
 

@@ -35,3 +35,8 @@ export const MAX_OPEN_SESSIONS_PER_AGENT = 1_000;
 // Generous ceiling: most turns produce ≤ 4 inbounds (one ask reply + a few related notifies).
 // Exceeding this is a runaway-loop signal; fail loud rather than build a huge transcript.
 export const MAX_INBOUNDS_REPLAYED_PER_RESUME = MAX_TURNS_PER_SESSION * 4; // 2000
+
+// Maximum descendants visited in one cascade_close pass. Prevents unbounded BFS on a
+// pathological chain. A chain wider/deeper than this is a runaway signal — fail loud
+// rather than churn through millions of rows.
+export const MAX_CASCADE_SESSIONS = 512;

@@ -57,7 +57,8 @@ export function parseNotifyInput(
 
 export const askToolSchema: ToolSchema = {
   name: ASK_TOOL_NAME,
-  description: "Send a question to a target agent and wait for their reply before continuing.",
+  description:
+    "Send a question to a target agent and wait for their reply before continuing. Do not call `ask` multiple times with the same `target_agent_id` in one turn — combine your questions into a single `ask`. If you need to follow up after seeing the reply, that follow-up belongs in the next turn.",
   inputSchema: {
     type: "object",
     properties: {
@@ -88,5 +89,16 @@ export function builtinInlineError(toolUseId: ToolUseIdBrand, reason: string) {
     toolUseId,
     content: reason,
     isError: true as const,
+  };
+}
+
+// Synthetic non-error tool_result. Pairs a tool_use without a real execution
+// (e.g., a concentrated duplicate ask pointing at its canonical sibling).
+export function builtinInlineToolResult(toolUseId: ToolUseIdBrand, content: string) {
+  return {
+    type: "tool_result" as const,
+    toolUseId,
+    content,
+    isError: false as const,
   };
 }

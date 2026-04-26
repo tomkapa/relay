@@ -69,6 +69,7 @@ import {
   parseAskInput,
   parseNotifyInput,
   builtinInlineError,
+  builtinInlineToolResult,
   askToolSchema,
   notifyToolSchema,
 } from "./builtin-tools.ts";
@@ -77,6 +78,7 @@ import { enqueue } from "../work_queue/queue-ops.ts";
 import type { TriggerPayload } from "../trigger/payload.ts";
 import { findOpenChildSession } from "./find-open-child.ts";
 import { writePendingAsk } from "./pending-asks.ts";
+import { MAX_MESSAGE_CONTENT_BYTES } from "../trigger/limits.ts";
 
 export type PendingAsk = {
   readonly toolUseId: ToolUseId;
@@ -577,9 +579,117 @@ async function dispatchOneAskOrNotify(
   return ok(undefined);
 }
 
-// Dispatch all boundary sends (asks + notifies) for a turn. Uses child session reuse:
-// if an open child exists for (parent, targetAgent), reuse it; otherwise create via session_start.
-// Writes pending-ask ledger rows for each ask.
+// Anthropic API contract: every tool_use block must be paired with a tool_result.
+// Folding N>1 asks into one carrier requires synthetic tool_results for asks 2..N.
+type ConcentratedAsks = {
+  readonly asks: readonly PendingAsk[];
+  readonly syntheticToolResults: readonly ToolResultBlock[];
+};
+
+function concentrateDuplicateAsks(
+  asks: readonly PendingAsk[],
+): Result<ConcentratedAsks, TurnLoopError> {
+  const groups = new Map<AgentIdBrand, PendingAsk[]>();
+  const order: AgentIdBrand[] = [];
+  for (const a of asks) {
+    const existing = groups.get(a.targetAgentId);
+    if (existing !== undefined) {
+      existing.push(a);
+    } else {
+      groups.set(a.targetAgentId, [a]);
+      order.push(a.targetAgentId);
+    }
+  }
+
+  const out: PendingAsk[] = [];
+  const synthetics: ToolResultBlock[] = [];
+
+  for (const target of order) {
+    const group = groups.get(target);
+    assert(group !== undefined && group.length > 0, "concentrateDuplicateAsks: missing group");
+    if (group.length === 1) {
+      const only = group[0];
+      assert(only !== undefined, "concentrateDuplicateAsks: group[0] must exist");
+      out.push(only);
+      continue;
+    }
+
+    counter(
+      "relay.session.duplicate_ask_concentrated_total",
+      "Bumped once per concentrated ask group.",
+    ).add(1);
+
+    const first = group[0];
+    assert(first !== undefined, "concentrateDuplicateAsks: first must exist");
+    const merged = group.map((a, i) => `${(i + 1).toString()}. ${a.content}`).join("\n\n");
+    if (Buffer.byteLength(merged, "utf8") > MAX_MESSAGE_CONTENT_BYTES) {
+      return err({ kind: "dispatch_failed", detail: "concentrated_content_too_large" });
+    }
+    out.push({ toolUseId: first.toolUseId, targetAgentId: first.targetAgentId, content: merged });
+    for (let i = 1; i < group.length; i++) {
+      const dup = group[i];
+      assert(dup !== undefined, "concentrateDuplicateAsks: dup must exist");
+      synthetics.push(
+        builtinInlineToolResult(dup.toolUseId, `<merged into ${first.toolUseId as string}>`),
+      );
+    }
+  }
+
+  return ok({ asks: out, syntheticToolResults: synthetics });
+}
+
+type DispatchBoundaryOutcome = {
+  readonly syntheticToolResults: readonly ToolResultBlock[];
+};
+
+// Resolve the child session for one dispatch slot, reusing when possible. Updates
+// `seenTargets` so subsequent same-target sends in this batch route via inbound_message.
+// Bumps reuse/create counters with low-cardinality attributes.
+async function resolveChildForDispatch(
+  sql: Sql,
+  ctx: TurnCtx,
+  targetAgentId: AgentIdBrand,
+  kind: "ask" | "notify",
+  seenTargets: Map<AgentIdBrand, SessionId>,
+): Promise<{ childSessionId: SessionId; isExistingChild: boolean }> {
+  const inBatch = seenTargets.get(targetAgentId);
+  if (inBatch !== undefined) {
+    counter(
+      "relay.session.child_reused_total",
+      "Bumped when a dispatch routes via inbound_message because of an existing-or-just-derived child.",
+    ).add(1, { [Attr.SendKind]: kind, [Attr.ReuseScope]: "in_batch" });
+    return { childSessionId: inBatch, isExistingChild: true };
+  }
+
+  const existing = await findOpenChildSession(sql, {
+    parentSessionId: ctx.sessionId,
+    targetAgentId,
+    tenantId: ctx.tenantId,
+  });
+  if (existing !== null) {
+    counter("relay.session.child_reused_total").add(1, {
+      [Attr.SendKind]: kind,
+      [Attr.ReuseScope]: "cross_turn",
+    });
+    seenTargets.set(targetAgentId, existing.childSessionId);
+    return { childSessionId: existing.childSessionId, isExistingChild: true };
+  }
+
+  const derived = deriveChildSessionId(ctx, targetAgentId);
+  counter(
+    "relay.session.child_created_total",
+    "Bumped when a dispatch creates a fresh child via session_start.",
+  ).add(1, { [Attr.SendKind]: kind });
+  seenTargets.set(targetAgentId, derived);
+  return { childSessionId: derived, isExistingChild: false };
+}
+
+// Dispatch all boundary sends (asks + notifies) for a turn. Two phases:
+//  1. concentrateDuplicateAsks: merge per-target ask duplicates into one envelope each
+//     and emit synthetic immediate tool_results for the merged-away asks.
+//  2. in-batch dedup: across both kinds, the first send to a target creates/finds the
+//     child; subsequent same-target sends route via inbound_message.
+// Returns the synthetic tool_results so the caller can append them to the persisted turn.
 async function dispatchBoundarySends(
   sql: Sql,
   clock: Clock,
@@ -588,7 +698,7 @@ async function dispatchBoundarySends(
   depth: DepthBrand,
   asks: readonly PendingAsk[],
   notifies: readonly NotifyDispatch[],
-): Promise<Result<void, TurnLoopError>> {
+): Promise<Result<DispatchBoundaryOutcome, TurnLoopError>> {
   assert(
     (depth as number) >= 0,
     "dispatchBoundarySends: depth must be provided when asks are present",
@@ -597,35 +707,30 @@ async function dispatchBoundarySends(
     return err({ kind: "dispatch_failed", detail: "depth cap exceeded on child session" });
   }
 
+  const agentIdCheck = AgentId.parse(ctx.agentId);
+  assert(agentIdCheck.ok, "dispatchBoundarySends: ctx.agentId is invalid");
+
+  const concentrated = concentrateDuplicateAsks(asks);
+  if (!concentrated.ok) return concentrated;
+
   const now = new Date(clock.now());
 
   type AnyDispatch = (PendingAsk & { isAsk: true }) | (NotifyDispatch & { isAsk: false });
   const all: AnyDispatch[] = [
-    ...asks.map((a) => ({ ...a, isAsk: true as const })),
+    ...concentrated.value.asks.map((a) => ({ ...a, isAsk: true as const })),
     ...notifies.map((n) => ({ ...n, isAsk: false as const })),
   ];
 
-  const agentIdCheck = AgentId.parse(ctx.agentId);
-  assert(agentIdCheck.ok, "dispatchBoundarySends: ctx.agentId is invalid");
+  const seenTargets = new Map<AgentIdBrand, SessionId>();
 
   for (const dispatch of all) {
-    const existing = await findOpenChildSession(sql, {
-      parentSessionId: ctx.sessionId,
-      targetAgentId: dispatch.targetAgentId,
-      tenantId: ctx.tenantId,
-    });
-
-    let childSessionId: SessionId;
-    let isExistingChild: boolean;
-
-    if (existing !== null) {
-      childSessionId = existing.childSessionId;
-      isExistingChild = true;
-    } else {
-      childSessionId = deriveChildSessionId(ctx, dispatch.targetAgentId);
-      isExistingChild = false;
-    }
-
+    const { childSessionId, isExistingChild } = await resolveChildForDispatch(
+      sql,
+      ctx,
+      dispatch.targetAgentId,
+      dispatch.isAsk ? "ask" : "notify",
+      seenTargets,
+    );
     const r = await dispatchOneAskOrNotify(
       sql,
       ctx,
@@ -639,7 +744,7 @@ async function dispatchBoundarySends(
     if (!r.ok) return r;
   }
 
-  return ok(undefined);
+  return ok({ syntheticToolResults: concentrated.value.syntheticToolResults });
 }
 
 type OneTurnResult = { readonly turn: Turn; readonly dispatchOutcome: TurnDispatchOutcome };
@@ -803,29 +908,20 @@ export async function runTurnLoop(
       return turnResult;
     }
 
-    const { turn, dispatchOutcome } = turnResult.value;
-    turns.push(turn);
+    const { turn: rawTurn, dispatchOutcome } = turnResult.value;
 
-    const saved = await insertTurn(deps.sql, {
-      turn,
-      sessionId: input.sessionId,
-      tenantId: input.tenantId,
-      agentId: input.agentId,
-      drainedPendingIds: drainedIds,
-    });
-    if (!saved.ok) {
-      turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "persist_error" });
-      return saved;
-    }
-
-    // Boundary dispatch: persist first (two-phase, RELAY-73), then send.
-    // If any asks survived, dispatch all sends (ask + notify) in one boundary span.
+    // Boundary dispatch runs BEFORE persistence so that any synthetic tool_results
+    // produced by ask-concentration land on the persisted turn. External
+    // writes (envelopes, work items, pending_asks) are idempotent: on persistence
+    // failure the worker's retry replays the model call and rewriters short-circuit
+    // on existing rows, so the "persist after send" reordering does not double-fan-out.
+    let synthetics: readonly ToolResultBlock[] = [];
     if (dispatchOutcome.pendingAsks.length > 0 || dispatchOutcome.notifies.length > 0) {
       const dispatchErr = await withSpan(
         SpanName.BoundaryDispatch,
         {
           [Attr.SessionId]: input.sessionId,
-          [Attr.TurnId]: turn.id,
+          [Attr.TurnId]: rawTurn.id,
           [Attr.SendCount]: dispatchOutcome.pendingAsks.length + dispatchOutcome.notifies.length,
         },
         async () => {
@@ -833,7 +929,7 @@ export async function runTurnLoop(
             sessionId: input.sessionId,
             agentId: input.agentId,
             tenantId: input.tenantId,
-            turnId: turn.id,
+            turnId: rawTurn.id,
           };
           assert(
             input.chainId !== undefined && input.depth !== undefined,
@@ -854,6 +950,25 @@ export async function runTurnLoop(
         turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "dispatch_error" });
         return dispatchErr;
       }
+      synthetics = dispatchErr.value.syntheticToolResults;
+    }
+
+    const turn: Turn =
+      synthetics.length === 0
+        ? rawTurn
+        : { ...rawTurn, toolResults: [...rawTurn.toolResults, ...synthetics] };
+    turns.push(turn);
+
+    const saved = await insertTurn(deps.sql, {
+      turn,
+      sessionId: input.sessionId,
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      drainedPendingIds: drainedIds,
+    });
+    if (!saved.ok) {
+      turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "persist_error" });
+      return saved;
     }
 
     // Suspend if any asks are pending — skip pushing tool_results into messages.
