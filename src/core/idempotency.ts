@@ -71,10 +71,16 @@ export function idempotencyKeyToUuid(key: IdempotencyKey): string {
   });
   // key[12] (original version nibble) is overwritten by '4'; key[13-15] are preserved.
   const p3 = `4${key.slice(13, 16)}`;
-  const variantByte = ((parseInt(key.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, "0");
+  const variantByte = ((parseInt(key.slice(16, 18), 16) & 0x3f) | 0x80)
+    .toString(16)
+    .padStart(2, "0");
   const uuid = `${key.slice(0, 8)}-${key.slice(8, 12)}-${p3}-${variantByte}${key.slice(18, 20)}-${key.slice(20, 32)}`;
-  assert(UUID_V4_RE.test(uuid), "idempotencyKeyToUuid: output is not a canonical UUID v4 variant-1", {
-    uuid,
-  });
+  assert(
+    UUID_V4_RE.test(uuid),
+    "idempotencyKeyToUuid: output is not a canonical UUID v4 variant-1",
+    {
+      uuid,
+    },
+  );
   return uuid;
 }

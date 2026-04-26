@@ -244,9 +244,7 @@ describe("parseEnvelopePayload — parent-link fields (ask-spawned child)", () =
   });
 
   test("rejects parentChainId without parentSessionId", () => {
-    const r = parseEnvelopePayload(
-      validMessagePayload({ parentChainId: VALID_UUID_CHAIN }),
-    );
+    const r = parseEnvelopePayload(validMessagePayload({ parentChainId: VALID_UUID_CHAIN }));
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe("parent_link_invalid");
@@ -260,9 +258,7 @@ describe("parseEnvelopePayload — parent-link fields (ask-spawned child)", () =
   });
 
   test("rejects parentToolUseId without parentSessionId", () => {
-    const r = parseEnvelopePayload(
-      validMessagePayload({ parentToolUseId: "toolu_ask_01" }),
-    );
+    const r = parseEnvelopePayload(validMessagePayload({ parentToolUseId: "toolu_ask_01" }));
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe("parent_link_invalid");

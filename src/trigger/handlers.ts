@@ -7,15 +7,7 @@ import { assert } from "../core/assert.ts";
 import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result, unreachable } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
-import {
-  ChainId,
-  Depth,
-  EnvelopeId,
-  InboundMessageId,
-  TaskId,
-  TenantId,
-  mintId,
-} from "../ids.ts";
+import { ChainId, Depth, EnvelopeId, InboundMessageId, TaskId, TenantId, mintId } from "../ids.ts";
 import type {
   AgentId as AgentIdBrand,
   ChainId as ChainIdBrand,
@@ -402,8 +394,14 @@ async function handleSessionStart(
       if (payload.kind === "message" && payload.parentSessionId !== undefined) {
         // Child session spawned by an ask() call — inherit chain, increment depth.
         // parentChainId and parentDepth are guaranteed present by parseEnvelopePayload when parentSessionId is set.
-        assert(payload.parentChainId !== undefined, "handleSessionStart: parentChainId missing despite parentSessionId");
-        assert(payload.parentDepth !== undefined, "handleSessionStart: parentDepth missing despite parentSessionId");
+        assert(
+          payload.parentChainId !== undefined,
+          "handleSessionStart: parentChainId missing despite parentSessionId",
+        );
+        assert(
+          payload.parentDepth !== undefined,
+          "handleSessionStart: parentDepth missing despite parentSessionId",
+        );
         const childDepthResult = Depth.parse(payload.parentDepth + 1);
         if (!childDepthResult.ok) {
           return err<HandlerError>({

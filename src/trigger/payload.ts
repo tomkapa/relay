@@ -163,7 +163,10 @@ export function parseEnvelopePayload(
         return err({ kind: "session_id_invalid", reason: sessionResult.error.kind });
       }
       if (body.parentChainId === undefined) {
-        return err({ kind: "chain_id_invalid", reason: "parentChainId required with parentSessionId" });
+        return err({
+          kind: "chain_id_invalid",
+          reason: "parentChainId required with parentSessionId",
+        });
       }
       const chainResult = ChainId.parse(body.parentChainId);
       if (!chainResult.ok) {
