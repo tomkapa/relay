@@ -34,6 +34,7 @@ type JoinRow = {
   readonly closed_at: Date | null;
   readonly chain_id: string;
   readonly depth: number;
+  readonly parent_session_id: string | null;
   readonly agent_system_prompt: string | null;
   readonly agent_tenant_id: string | null;
 };
@@ -51,6 +52,7 @@ export async function loadOpenTargetSession(
         tenantId: TenantIdBrand;
         chainId: ChainIdBrand;
         depth: DepthBrand;
+        parentSessionId: SessionIdBrand | null;
       };
       agent: LoadedAgent;
     },
@@ -59,7 +61,7 @@ export async function loadOpenTargetSession(
 > {
   const rows = await sql<JoinRow[]>`
     SELECT s.id, s.agent_id, s.tenant_id, s.closed_at,
-           s.chain_id, s.depth,
+           s.chain_id, s.depth, s.parent_session_id,
            a.system_prompt AS agent_system_prompt,
            a.tenant_id     AS agent_tenant_id
     FROM sessions s
@@ -113,6 +115,15 @@ export async function loadOpenTargetSession(
   const depthResult = Depth.parse(row.depth);
   assert(depthResult.ok, "loadOpenTargetSession: invalid depth from DB", { depth: row.depth });
 
+  let parentSessionId: SessionIdBrand | null = null;
+  if (row.parent_session_id !== null) {
+    const parentResult = SessionId.parse(row.parent_session_id);
+    assert(parentResult.ok, "loadOpenTargetSession: invalid parent_session_id from DB", {
+      parent_session_id: row.parent_session_id,
+    });
+    parentSessionId = parentResult.value;
+  }
+
   return ok({
     session: {
       id: sessionIdResult.value,
@@ -120,6 +131,7 @@ export async function loadOpenTargetSession(
       tenantId: tenantResult.value,
       chainId: chainIdResult.value,
       depth: depthResult.value,
+      parentSessionId,
     },
     agent: {
       id: agentIdResult.value,

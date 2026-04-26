@@ -6,11 +6,16 @@ import type { Sql } from "postgres";
 import { assert } from "../core/assert.ts";
 import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import { idempotencyKey, idempotencyKeyToUuid } from "../core/idempotency.ts";
+import {
+  idempotencyKey,
+  idempotencyKeyForChildSession,
+  idempotencyKeyToUuid,
+} from "../core/idempotency.ts";
 import {
   AgentId,
   Depth,
   EnvelopeId,
+  SessionId as SessionIdParser,
   TurnId,
   mintId,
   type AgentId as AgentIdBrand,
@@ -70,6 +75,8 @@ import {
 import { writeEnvelope } from "../trigger/envelope-ops.ts";
 import { enqueue } from "../work_queue/queue-ops.ts";
 import type { TriggerPayload } from "../trigger/payload.ts";
+import { findOpenChildSession } from "./find-open-child.ts";
+import { writePendingAsk } from "./pending-asks.ts";
 
 export type PendingAsk = {
   readonly toolUseId: ToolUseId;
@@ -486,8 +493,93 @@ async function dispatchTurn(
   return ok({ toolResults, pendingAsks, notifies });
 }
 
-// Emit envelope + session_start work item for each pending ask or notify.
-// Uses deterministic envelope ids so retried turns do not create duplicate child sessions.
+// Derive a deterministic child session id from (parentSessionId, targetAgentId).
+// Pure — no DB call. Caller is responsible for the prior findOpenChildSession lookup.
+function deriveChildSessionId(ctx: TurnCtx, targetAgentId: AgentIdBrand): SessionId {
+  const childKey = idempotencyKeyForChildSession({
+    parentSessionId: ctx.sessionId,
+    targetAgentId,
+  });
+  const childIdStr = idempotencyKeyToUuid(childKey);
+  const childIdResult = SessionIdParser.parse(childIdStr);
+  assert(childIdResult.ok, "deriveChildSessionId: invalid derived child session UUID");
+  return childIdResult.value;
+}
+
+// Emit envelope + session_start work item for a single ask or notify dispatch.
+// For asks: also writes the pending-ask ledger row.
+// For child reuse (open child found): sends inbound_message instead of session_start.
+async function dispatchOneAskOrNotify(
+  sql: Sql,
+  ctx: TurnCtx,
+  chainId: ChainIdBrand,
+  depth: DepthBrand,
+  dispatch: (PendingAsk & { isAsk: true }) | (NotifyDispatch & { isAsk: false }),
+  childSessionId: SessionId,
+  now: Date,
+  isExistingChild: boolean,
+): Promise<Result<void, TurnLoopError>> {
+  const envelopeIKey = idempotencyKey({
+    writer: dispatch.isAsk ? "ask" : "notify",
+    sessionId: ctx.sessionId,
+    turnId: ctx.turnId,
+    toolCallId: dispatch.toolUseId,
+  });
+  const envelopeIdStr = idempotencyKeyToUuid(envelopeIKey);
+  const envelopeIdResult = EnvelopeId.parse(envelopeIdStr);
+  assert(envelopeIdResult.ok, "dispatchOneAskOrNotify: invalid envelope UUID");
+
+  const payload: TriggerPayload = {
+    kind: "message",
+    sender: { type: "agent", id: ctx.agentId },
+    targetAgentId: dispatch.targetAgentId,
+    content: dispatch.content,
+    receivedAt: now,
+    parentSessionId: ctx.sessionId,
+    parentChainId: chainId,
+    parentDepth: depth,
+    childSessionId,
+    ...(dispatch.isAsk ? { parentToolUseId: dispatch.toolUseId } : {}),
+  };
+
+  const envelopeResult = await writeEnvelope(sql, ctx.tenantId, "message", payload, {
+    explicitId: envelopeIdResult.value,
+  });
+  if (!envelopeResult.ok) {
+    return err({
+      kind: "dispatch_failed",
+      detail: `writeEnvelope failed: ${envelopeResult.error.kind}`,
+    });
+  }
+
+  // Ledger write before enqueue: if the process crashes between the two, the retry
+  // re-enqueues; if it crashed after enqueue with no ledger row there is no safe recovery.
+  if (dispatch.isAsk) {
+    await writePendingAsk(sql, {
+      tenantId: ctx.tenantId,
+      parentSessionId: ctx.sessionId,
+      childSessionId,
+      parentToolUseId: dispatch.toolUseId,
+    });
+  }
+
+  const workKind = isExistingChild ? "inbound_message" : "session_start";
+  const workResult = await enqueue(sql, {
+    tenantId: ctx.tenantId,
+    kind: workKind,
+    payloadRef: envelopeResult.value,
+    scheduledAt: now,
+  });
+  if (!workResult.ok) {
+    return err({ kind: "dispatch_failed", detail: `enqueue failed: ${workResult.error.kind}` });
+  }
+
+  return ok(undefined);
+}
+
+// Dispatch all boundary sends (asks + notifies) for a turn. Uses child session reuse:
+// if an open child exists for (parent, targetAgent), reuse it; otherwise create via session_start.
+// Writes pending-ask ledger rows for each ask.
 async function dispatchBoundarySends(
   sql: Sql,
   clock: Clock,
@@ -497,14 +589,6 @@ async function dispatchBoundarySends(
   asks: readonly PendingAsk[],
   notifies: readonly NotifyDispatch[],
 ): Promise<Result<void, TurnLoopError>> {
-  const now = new Date(clock.now());
-
-  type AnyDispatch = (PendingAsk & { isAsk: true }) | (NotifyDispatch & { isAsk: false });
-  const all: AnyDispatch[] = [
-    ...asks.map((a) => ({ ...a, isAsk: true as const })),
-    ...notifies.map((n) => ({ ...n, isAsk: false as const })),
-  ];
-
   assert(
     (depth as number) >= 0,
     "dispatchBoundarySends: depth must be provided when asks are present",
@@ -513,57 +597,46 @@ async function dispatchBoundarySends(
     return err({ kind: "dispatch_failed", detail: "depth cap exceeded on child session" });
   }
 
+  const now = new Date(clock.now());
+
+  type AnyDispatch = (PendingAsk & { isAsk: true }) | (NotifyDispatch & { isAsk: false });
+  const all: AnyDispatch[] = [
+    ...asks.map((a) => ({ ...a, isAsk: true as const })),
+    ...notifies.map((n) => ({ ...n, isAsk: false as const })),
+  ];
+
+  const agentIdCheck = AgentId.parse(ctx.agentId);
+  assert(agentIdCheck.ok, "dispatchBoundarySends: ctx.agentId is invalid");
+
   for (const dispatch of all) {
-    const iKey = idempotencyKey({
-      writer: dispatch.isAsk ? "ask" : "notify",
-      sessionId: ctx.sessionId,
-      turnId: ctx.turnId,
-      toolCallId: dispatch.toolUseId,
-    });
-    const explicitIdStr = idempotencyKeyToUuid(iKey);
-    const explicitIdResult = EnvelopeId.parse(explicitIdStr);
-    assert(
-      explicitIdResult.ok,
-      "dispatchBoundarySends: idempotencyKeyToUuid produced invalid UUID",
-    );
-
-    const sender = AgentId.parse(ctx.agentId);
-    assert(sender.ok, "dispatchBoundarySends: ctx.agentId is invalid");
-
-    const payload: TriggerPayload = {
-      kind: "message",
-      sender: { type: "agent", id: ctx.agentId },
-      targetAgentId: dispatch.targetAgentId,
-      content: dispatch.content,
-      receivedAt: now,
+    const existing = await findOpenChildSession(sql, {
       parentSessionId: ctx.sessionId,
-      parentChainId: chainId,
-      parentDepth: depth,
-      ...(dispatch.isAsk ? { parentToolUseId: dispatch.toolUseId } : {}),
-    };
-
-    const envelopeResult = await writeEnvelope(sql, ctx.tenantId, "message", payload, {
-      explicitId: explicitIdResult.value,
-    });
-    if (!envelopeResult.ok) {
-      return err({
-        kind: "dispatch_failed",
-        detail: `writeEnvelope failed: ${envelopeResult.error.kind}`,
-      });
-    }
-
-    const workResult = await enqueue(sql, {
+      targetAgentId: dispatch.targetAgentId,
       tenantId: ctx.tenantId,
-      kind: "session_start",
-      payloadRef: envelopeResult.value,
-      scheduledAt: now,
     });
-    if (!workResult.ok) {
-      return err({
-        kind: "dispatch_failed",
-        detail: `enqueue failed: ${workResult.error.kind}`,
-      });
+
+    let childSessionId: SessionId;
+    let isExistingChild: boolean;
+
+    if (existing !== null) {
+      childSessionId = existing.childSessionId;
+      isExistingChild = true;
+    } else {
+      childSessionId = deriveChildSessionId(ctx, dispatch.targetAgentId);
+      isExistingChild = false;
     }
+
+    const r = await dispatchOneAskOrNotify(
+      sql,
+      ctx,
+      chainId,
+      depth,
+      dispatch,
+      childSessionId,
+      now,
+      isExistingChild,
+    );
+    if (!r.ok) return r;
   }
 
   return ok(undefined);

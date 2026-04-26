@@ -7,7 +7,16 @@ import { assert } from "../core/assert.ts";
 import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result, unreachable } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
-import { ChainId, Depth, EnvelopeId, InboundMessageId, TaskId, TenantId, mintId } from "../ids.ts";
+import {
+  ChainId,
+  Depth,
+  EnvelopeId,
+  InboundMessageId,
+  SessionId,
+  TaskId,
+  TenantId,
+  mintId,
+} from "../ids.ts";
 import type {
   AgentId as AgentIdBrand,
   ChainId as ChainIdBrand,
@@ -45,8 +54,10 @@ import { runHooks } from "../hook/run.ts";
 import { snapshotHookConfig } from "../hook/snapshot.ts";
 import { HOOK_EVENT } from "../hook/types.ts";
 import type { Message } from "../session/turn.ts";
-import { closeSession } from "../session/close.ts";
+import { closeSession, markSessionTerminal } from "../session/close.ts";
 import type { SessionCloseError, SessionEndReason } from "../session/close.ts";
+import { quiesceSession } from "../session/quiesce.ts";
+import type { SessionQuiesceError } from "../session/quiesce.ts";
 import type { TranscriptEntry } from "../session/transcript.ts";
 
 export type HandlerDeps = {
@@ -221,6 +232,22 @@ function mintChainAndDepth(): { chainId: ChainIdBrand; depth: DepthBrand } {
   return { chainId, depth: depthResult.value };
 }
 
+function mapQuiesceError(
+  e: Exclude<SessionQuiesceError, { kind: "session_already_terminal" }>,
+): HandlerError {
+  switch (e.kind) {
+    case "session_not_found":
+      return {
+        kind: "handler_failed",
+        reason: `session not found at quiesce: ${e.sessionId as string}`,
+      };
+    case "tenant_mismatch":
+      return { kind: "handler_failed", reason: "session tenant mismatch at quiesce" };
+    default:
+      throw unreachable(e);
+  }
+}
+
 async function runLoopAndClose(
   deps: HandlerDeps,
   item: WorkItem,
@@ -230,6 +257,7 @@ async function runLoopAndClose(
   depth: DepthBrand,
   systemPrompt: string,
   initialMessages: readonly Message[],
+  parentSessionId: SessionIdBrand | null,
   startTurnIndex = 0,
 ): Promise<Result<void, HandlerError>> {
   const loopResult = await runTurnLoop(
@@ -271,6 +299,33 @@ async function runLoopAndClose(
       [Attr.SessionId]: session.id,
       [Attr.WorkId]: item.id,
       [Attr.PendingAskCount]: pendingAskCount,
+    });
+    return ok(undefined);
+  }
+
+  // Top-level sessions close with SessionEnd hook; child sessions quiesce (no closed_at).
+  const isChild = parentSessionId !== null;
+
+  if (isChild) {
+    const quiesceResult = await quiesceSession(deps.sql, deps.clock, {
+      sessionId: session.id,
+      tenantId: item.tenantId,
+      agentId,
+      chainId,
+      depth,
+      reason: { kind: "loop_end_no_pending" },
+    });
+    if (!quiesceResult.ok) {
+      // session_already_terminal is acceptable (cascade raced us) — treat as success.
+      if (quiesceResult.error.kind === "session_already_terminal") {
+        return ok(undefined);
+      }
+      return err(mapQuiesceError(quiesceResult.error));
+    }
+    counter("relay.session.turn_loop_outcome_total").add(1, {
+      [Attr.TenantId]: item.tenantId,
+      [Attr.TriggerKind]: item.kind,
+      [Attr.TurnLoopOutcome]: "quiesced",
     });
     return ok(undefined);
   }
@@ -326,7 +381,7 @@ async function finalizeSession(
       chainId,
       depth,
       parentSessionId,
-      triggerKind: item.kind,
+      triggerKind: item.kind as "session_start" | "task_fire" | "inbound_message",
     },
   );
   if (aggregate.decision === "deny") {
@@ -390,6 +445,7 @@ async function handleSessionStart(
       let depth: DepthBrand;
       let parentSessionId: SessionIdBrand | null = null;
       let parentToolUseId: ToolUseIdBrand | null = null;
+      let explicitChildSessionId: SessionIdBrand | undefined;
 
       if (payload.kind === "message" && payload.parentSessionId !== undefined) {
         // Child session spawned by an ask() call — inherit chain, increment depth.
@@ -402,6 +458,10 @@ async function handleSessionStart(
           payload.parentDepth !== undefined,
           "handleSessionStart: parentDepth missing despite parentSessionId",
         );
+        assert(
+          payload.childSessionId !== undefined,
+          "handleSessionStart: childSessionId missing despite parentSessionId",
+        );
         const childDepthResult = Depth.parse(payload.parentDepth + 1);
         if (!childDepthResult.ok) {
           return err<HandlerError>({
@@ -412,6 +472,7 @@ async function handleSessionStart(
         chainId = payload.parentChainId;
         depth = childDepthResult.value;
         parentSessionId = payload.parentSessionId;
+        explicitChildSessionId = payload.childSessionId;
         if (payload.parentToolUseId !== undefined) {
           parentToolUseId = payload.parentToolUseId;
         }
@@ -447,6 +508,7 @@ async function handleSessionStart(
         sourceWorkItemId: item.id,
         openingUserContent: context.userText,
         parentToolUseId,
+        ...(explicitChildSessionId !== undefined ? { explicitId: explicitChildSessionId } : {}),
       });
       if (!sessionResult.ok) return err(mapSessionError(sessionResult.error));
 
@@ -473,6 +535,7 @@ async function handleSessionStart(
         depth,
         enrichedSystemPrompt,
         initialMessages,
+        parentSessionId,
       );
       if (!loopResult.ok) return loopResult;
 
@@ -590,6 +653,7 @@ async function handleTaskFire(
         depth,
         enrichedSystemPrompt,
         initialMessages,
+        null,
       );
       if (!loopResult.ok) return loopResult;
 
@@ -777,8 +841,83 @@ async function handleInboundMessage(
         targetResult.value.session.depth,
         resumeResult.value.systemPrompt,
         resumeResult.value.initialMessages,
+        targetResult.value.session.parentSessionId,
         resumeResult.value.startTurnIndex,
       );
+    },
+  );
+}
+
+// Maximum descendants visited in one cascade_close pass. Prevents unbounded BFS
+// on a pathological chain depth.
+const MAX_CASCADE_SESSIONS = 512;
+
+// Iterative BFS cascade close — no recursion (CLAUDE.md §4).
+// Reads direct children of each session in queue, marks each terminal.
+// SessionEnd is NOT fired on children — cascade is a silent internal sweep.
+async function handleCascadeClose(
+  deps: HandlerDeps,
+  item: WorkItem,
+): Promise<Result<void, HandlerError>> {
+  return withSpan(
+    SpanName.SessionCascade,
+    { [Attr.TenantId]: item.tenantId, [Attr.WorkKind]: item.kind },
+    async () => {
+      const rootSessionIdResult = SessionId.parse(item.payloadRef);
+      if (!rootSessionIdResult.ok) {
+        return err<HandlerError>({
+          kind: "handler_failed",
+          reason: `cascade_close: invalid session id in payload_ref: ${rootSessionIdResult.error.kind}`,
+        });
+      }
+
+      const rootId = rootSessionIdResult.value;
+      const now = new Date(deps.clock.now());
+      const queue: SessionIdBrand[] = [rootId];
+      let visited = 0;
+
+      assert(queue.length > 0, "handleCascadeClose: queue must start non-empty");
+
+      while (queue.length > 0) {
+        const sessionId = queue.shift();
+        assert(sessionId !== undefined, "handleCascadeClose: shifted undefined from queue");
+        visited++;
+        assert(visited <= MAX_CASCADE_SESSIONS, "handleCascadeClose: cascade cap exceeded", {
+          visited,
+        });
+
+        // Mark terminal — skip root (already closed by closeSession).
+        if (sessionId !== rootId) {
+          await markSessionTerminal(deps.sql, sessionId, now);
+        }
+
+        // Find open children and enqueue them for BFS.
+        const childRows = await deps.sql<{ readonly id: string }[]>`
+          SELECT id FROM sessions
+          WHERE parent_session_id = ${sessionId}
+            AND tenant_id = ${item.tenantId}
+            AND closed_at IS NULL
+        `;
+
+        for (const child of childRows) {
+          const childIdResult = SessionId.parse(child.id);
+          assert(childIdResult.ok, "handleCascadeClose: invalid child session id from DB", {
+            id: child.id,
+          });
+          queue.push(childIdResult.value);
+        }
+      }
+
+      counter("relay.session.cascade_closed_total").add(visited, {
+        [Attr.TenantId]: item.tenantId,
+      });
+      emit("INFO", "session.cascade.complete", {
+        [Attr.TenantId]: item.tenantId,
+        [Attr.SessionId]: rootId,
+        [Attr.CascadeDepth]: visited,
+      });
+
+      return ok(undefined);
     },
   );
 }
@@ -788,5 +927,6 @@ export function triggerHandlers(deps: HandlerDeps): Dispatcher {
     session_start: (item, signal) => handleSessionStart(deps, item, signal),
     task_fire: (item, signal) => handleTaskFire(deps, item, signal),
     inbound_message: (item) => handleInboundMessage(deps, item),
+    cascade_close: (item) => handleCascadeClose(deps, item),
   };
 }

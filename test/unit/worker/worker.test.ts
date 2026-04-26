@@ -103,6 +103,7 @@ function makeNoopDispatcher(): Dispatcher {
     session_start: handler,
     task_fire: handler,
     inbound_message: handler,
+    cascade_close: handler,
   };
 }
 
@@ -275,6 +276,7 @@ describe("runWorker", () => {
         Promise.resolve(err<HandlerError>({ kind: "handler_failed", reason: "test error" })),
       task_fire: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
       inbound_message: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
+      cascade_close: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
     };
 
     const workerPromise = runWorker(
@@ -324,6 +326,7 @@ describe("runWorker", () => {
         return ok(undefined);
       },
       inbound_message: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
+      cascade_close: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
     };
 
     const renewCalls: number[] = [];
@@ -467,6 +470,7 @@ describe("runWorker", () => {
         });
       },
       inbound_message: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
+      cascade_close: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
     };
 
     const queue = makeWorkerQueueFake([ok([item])]);
@@ -504,6 +508,7 @@ describe("runWorker", () => {
       },
       task_fire: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
       inbound_message: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
+      cascade_close: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
     };
 
     const queue = makeWorkerQueueFake([ok([item])]);
@@ -663,6 +668,7 @@ describe("runWorker", () => {
         Promise.resolve(err<HandlerError>({ kind: "handler_failed", reason: "test" })),
       task_fire: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
       inbound_message: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
+      cascade_close: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
     };
 
     const workerPromise = runWorker(
@@ -718,6 +724,7 @@ describe("runWorker", () => {
       task_fire: (): Promise<Result<void, HandlerError>> =>
         Promise.reject(new Error("handler crashed")),
       inbound_message: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
+      cascade_close: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
     };
 
     const workerPromise = runWorker(
@@ -766,6 +773,7 @@ describe("runWorker", () => {
         return ok(undefined);
       },
       inbound_message: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
+      cascade_close: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
     };
 
     let dequeueCount = 0;
@@ -933,6 +941,7 @@ describe("cross-process trace context restoration", () => {
       },
       task_fire: noop,
       inbound_message: noop,
+      cascade_close: noop,
     };
 
     const workerPromise = runWorker(

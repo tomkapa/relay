@@ -17,7 +17,12 @@ import {
 // that are not UUIDs, so they don't live in `ids.ts` with the entity ids.
 export type WorkerId = Brand<string, "WorkerId">;
 
-export const WORK_KINDS = ["session_start", "task_fire", "inbound_message"] as const;
+export const WORK_KINDS = [
+  "session_start",
+  "task_fire",
+  "inbound_message",
+  "cascade_close",
+] as const;
 export type WorkKind = (typeof WORK_KINDS)[number];
 
 export type WorkQueueError =

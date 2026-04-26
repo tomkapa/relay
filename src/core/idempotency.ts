@@ -61,6 +61,19 @@ export function idempotencyKeyForAskReply(input: {
   ) as IdempotencyKey;
 }
 
+// Deterministic idempotency key for a child session derived from (parentSessionId, targetAgentId).
+// Guarantees at most one open child per (parent, agent) pair within a chain (RELAY-146).
+export function idempotencyKeyForChildSession(input: {
+  readonly parentSessionId: SessionId;
+  readonly targetAgentId: AgentId;
+}): IdempotencyKey {
+  assert(input.parentSessionId.length > 0, "idempotencyKeyForChildSession: parentSessionId empty");
+  assert(input.targetAgentId.length > 0, "idempotencyKeyForChildSession: targetAgentId empty");
+  return sha256Hex(
+    `child_session|${input.parentSessionId}|${input.targetAgentId}`,
+  ) as IdempotencyKey;
+}
+
 // Convert a 64-hex IdempotencyKey to a deterministic UUID v4 string. Used to derive a
 // stable row-id for `ON CONFLICT (id) DO NOTHING` insert patterns (e.g. envelope dedup).
 // Bits 4-7 of group 3 are fixed to '4' (version) and bits 6-7 of group 4 are fixed to '10'

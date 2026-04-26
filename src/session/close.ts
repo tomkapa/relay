@@ -24,6 +24,7 @@ import { HOOK_EVENT } from "../hook/types.ts";
 import { readFinalTurnResponse } from "./read-final-turn.ts";
 import { writeInboundMessage } from "../trigger/inbound/inbound-ops.ts";
 import { enqueue } from "../work_queue/queue-ops.ts";
+import { markCascadeOrphaned } from "./pending-asks.ts";
 
 // Close reason tags. Additive union — future tasks (abandoned-after-deadline, admin-force-close)
 // extend here. RELAY-93 adds nothing: suspend is NOT a close.
@@ -157,7 +158,8 @@ export async function closeSession(
           });
         }
 
-        // Route ask reply to parent session if this is an ask-spawned child.
+        // Safety net for any session that reaches closeSession with a parent link —
+        // child sessions normally go through quiesceSession, so this should not fire.
         if (row.parent_session_id !== null && row.parent_tool_use_id !== null) {
           const toolUseIdResult = ToolUseId.parse(row.parent_tool_use_id);
           assert(toolUseIdResult.ok, "closeSession: invalid parent_tool_use_id from DB", {
@@ -170,6 +172,11 @@ export async function closeSession(
             tenantId: spec.tenantId,
             childAgentId: spec.agentId,
           });
+        }
+
+        // Top-level sessions trigger a cascade_close to terminate all open descendants.
+        if (row.parent_session_id === null) {
+          await enqueueCascadeClose(sql, clock, spec.sessionId, spec.tenantId);
         }
 
         span.setAttribute(Attr.SessionDurationMs, outcome.at.getTime() - row.created_at.getTime());
@@ -188,7 +195,7 @@ function dropLateReply(
 ): void {
   counter("relay.session.late_reply_dropped_total").add(1, {
     [Attr.TenantId]: tenantId,
-    reason,
+    [Attr.DropReason]: reason,
   });
   emit("WARN", `session.ask_reply.${reason}`, {
     [Attr.SessionId]: childSessionId,
@@ -320,6 +327,61 @@ export async function emitSessionSyncClose(
       error: (e as Error).message,
     });
   }
+}
+
+// Enqueue a cascade_close work item for the root session. Failures are caught and logged —
+// a notify failure must NOT unwind the close. The cascade worker handles descendant traversal.
+async function enqueueCascadeClose(
+  sql: Sql,
+  clock: Clock,
+  sessionId: SessionIdBrand,
+  tenantId: TenantIdBrand,
+): Promise<void> {
+  try {
+    const now = new Date(clock.now());
+    const workResult = await enqueue(sql, {
+      tenantId,
+      kind: "cascade_close",
+      payloadRef: sessionId,
+      scheduledAt: now,
+    });
+    if (!workResult.ok) {
+      emit("WARN", "session.cascade_close.enqueue_failed", {
+        [Attr.SessionId]: sessionId,
+        [Attr.TenantId]: tenantId,
+        error: workResult.error.kind,
+      });
+    }
+  } catch (e) {
+    emit("WARN", "session.cascade_close.enqueue_threw", {
+      [Attr.SessionId]: sessionId,
+      error: (e as Error).message,
+    });
+  }
+}
+
+// Mark a session terminal (set closed_at) without firing SessionEnd hook or routing ask replies.
+// Used by cascade_close to terminate child sessions without emitting SessionEnd events.
+// Returns true if this call set the timestamp (won the race), false if already closed.
+export async function markSessionTerminal(
+  sql: Sql,
+  sessionId: SessionIdBrand,
+  now: Date,
+): Promise<boolean> {
+  assert(sessionId.length > 0, "markSessionTerminal: sessionId non-empty");
+
+  const updated = await sql<{ readonly id: string }[]>`
+    UPDATE sessions
+    SET closed_at = ${now}, updated_at = ${now}
+    WHERE id = ${sessionId} AND closed_at IS NULL
+    RETURNING id
+  `;
+
+  if (updated.length > 0) {
+    await markCascadeOrphaned(sql, sessionId, now);
+    return true;
+  }
+  return false;
 }
 
 // Returns false for missing sessions — callers that need to distinguish "not-found" from "open"

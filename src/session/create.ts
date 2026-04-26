@@ -34,6 +34,9 @@ export type CreateSessionSpec = Readonly<{
   sourceWorkItemId: WorkItemId;
   openingUserContent: string; // rendered user text persisted for transcript reload on resume
   parentToolUseId: ToolUseIdBrand | null; // non-null only for ask-spawned child sessions
+  // Non-null for child sessions: deterministic id derived from (parentSessionId, targetAgentId).
+  // ON CONFLICT (id) DO NOTHING handles races between workers both trying to create the same child.
+  explicitId?: SessionIdBrand;
 }>;
 
 export type SessionCreateError =
@@ -81,6 +84,42 @@ async function insertSession(
     spec.parentToolUseId === null || spec.parentToolUseId.length > 0,
     "insertSession: parentToolUseId must be non-empty when set",
   );
+
+  // Child sessions use their deterministic explicitId as the dedup key (ON CONFLICT (id)).
+  // Fresh sessions use the source_work_item_id conflict for idempotent retried work items.
+  if (spec.explicitId !== undefined) {
+    const rows = await tx<InsertRow[]>`
+      INSERT INTO sessions (
+        id, agent_id, tenant_id, originating_trigger,
+        parent_session_id, chain_id, depth,
+        source_work_item_id, opening_user_content,
+        parent_tool_use_id,
+        created_at, updated_at
+      )
+      VALUES (
+        ${spec.explicitId},
+        ${spec.agentId},
+        ${spec.tenantId},
+        ${tx.json(spec.originatingTrigger as DbJson)},
+        ${spec.parentSessionId},
+        ${spec.chainId},
+        ${spec.depth as number},
+        ${spec.sourceWorkItemId},
+        ${spec.openingUserContent},
+        ${spec.parentToolUseId},
+        ${createdAt},
+        ${createdAt}
+      )
+      ON CONFLICT (id) DO NOTHING
+      RETURNING id
+    `;
+    if (rows.length === 0) return null;
+    const row = firstRow(rows, "insertSession.explicit");
+    const parsedId = SessionId.parse(row.id);
+    assert(parsedId.ok, "insertSession: invalid id from DB (explicit)", { id: row.id });
+    return parsedId.value;
+  }
+
   const rows = await tx<InsertRow[]>`
     INSERT INTO sessions (
       id, agent_id, tenant_id, originating_trigger,
@@ -164,6 +203,11 @@ export async function createSession(
         return ok({ id: insertedId, isDuplicate: false });
       }
 
+      // ON CONFLICT path — return the existing row.
+      if (spec.explicitId !== undefined) {
+        // For child sessions, the explicit id IS the dedup key.
+        return ok({ id: spec.explicitId, isDuplicate: true });
+      }
       const existingId = await findByWorkItem(sql, spec.sourceWorkItemId);
       return ok({ id: existingId, isDuplicate: true });
     },

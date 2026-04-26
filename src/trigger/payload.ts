@@ -43,6 +43,8 @@ export type TriggerPayload =
       readonly parentChainId?: ChainIdBrand;
       readonly parentDepth?: DepthBrand;
       readonly parentToolUseId?: ToolUseIdBrand;
+      // Deterministic child session id — required when parentSessionId is present (RELAY-146).
+      readonly childSessionId?: SessionIdBrand;
     }
   | {
       readonly kind: "event";
@@ -96,6 +98,8 @@ const MessagePayloadSchema = z.object({
   parentChainId: z.uuid().optional(),
   parentDepth: z.number().int().min(0).optional(),
   parentToolUseId: z.string().min(1).max(128).optional(),
+  // Deterministic child session id — required when parentSessionId is present (RELAY-146).
+  childSessionId: z.uuid().optional(),
 });
 
 const EventPayloadSchema = z.object({
@@ -188,11 +192,24 @@ export function parseEnvelopePayload(
         parentToolUseId = toolUseIdResult.value;
       }
 
+      // childSessionId is required when parentSessionId is present (RELAY-146).
+      if (body.childSessionId === undefined) {
+        return err({
+          kind: "parent_link_invalid",
+          reason: "childSessionId required when parentSessionId is present",
+        });
+      }
+      const childSessionResult = SessionId.parse(body.childSessionId);
+      if (!childSessionResult.ok) {
+        return err({ kind: "session_id_invalid", reason: childSessionResult.error.kind });
+      }
+
       return ok({
         ...base,
         parentSessionId: sessionResult.value,
         parentChainId: chainResult.value,
         parentDepth: depthResult.value,
+        childSessionId: childSessionResult.value,
         ...(parentToolUseId !== undefined ? { parentToolUseId } : {}),
       });
     }
