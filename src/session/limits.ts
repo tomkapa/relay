@@ -30,3 +30,8 @@ export const ASK_DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
 // Max simultaneous open sessions per agent. Prevents unbounded fan-out of suspended waiters.
 export const MAX_OPEN_SESSIONS_PER_AGENT = 1_000;
+
+// Upper bound on inbound messages replayed during a multi-cycle resume (RELAY-232).
+// Generous ceiling: most turns produce ≤ 4 inbounds (one ask reply + a few related notifies).
+// Exceeding this is a runaway-loop signal; fail loud rather than build a huge transcript.
+export const MAX_INBOUNDS_REPLAYED_PER_RESUME = MAX_TURNS_PER_SESSION * 4; // 2000

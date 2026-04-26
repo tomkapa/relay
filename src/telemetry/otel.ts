@@ -61,6 +61,7 @@ export const SpanName = {
   TriggerSynthesize: "trigger.synthesize",
   WorkerHandle: "worker.handle",
   SessionClose: "session.close",
+  SessionLoadResume: "session.load_resume",
   SessionSyncDispatch: "session.sync.dispatch",
   BoundaryDispatch: "boundary.dispatch",
   HttpTriggerPost: "http.trigger.post",
@@ -116,6 +117,8 @@ export const Attr = {
   PendingAskCount: "relay.session.pending_ask_count",
   SendKind: "relay.send.kind",
   SendCount: "relay.send.count",
+  InboundsReplayed: "relay.session.inbounds_replayed",
+  UnansweredToolUses: "relay.session.unanswered_tool_uses",
 } as const;
 export type Attr = (typeof Attr)[keyof typeof Attr];
 

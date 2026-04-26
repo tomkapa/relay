@@ -121,6 +121,7 @@ async function insertTurnRow(
   tenantId: ReturnType<typeof tenant>,
   turnIndex: number,
   responseText: string,
+  completedAt?: Date,
 ): Promise<void> {
   const turnId = randomUUID();
   const response = sql.json({
@@ -130,10 +131,11 @@ async function insertTurnRow(
   });
   const toolResults = sql.json([]);
   const usage = sql.json({ inputTokens: 5, outputTokens: 3 });
-  const now = new Date();
+  // Default to epoch so the turn is reliably "in the past" relative to any fake-clock inbound.
+  const ts = completedAt ?? new Date(0);
   await sql`
     INSERT INTO turns (id, session_id, tenant_id, agent_id, turn_index, started_at, completed_at, response, tool_results, usage)
-    VALUES (${turnId}, ${sessionId}, ${tenantId}, ${agentId}, ${turnIndex}, ${now}, ${now}, ${response}, ${toolResults}, ${usage})
+    VALUES (${turnId}, ${sessionId}, ${tenantId}, ${agentId}, ${turnIndex}, ${ts}, ${ts}, ${response}, ${toolResults}, ${usage})
   `;
 }
 
@@ -836,11 +838,15 @@ describeOrSkip("inbound_message handler — error cases", () => {
       });
       assert(inboundResult.ok, "fixture: writeInboundMessage failed");
 
-      // Disable FK checks to reroute the inbound to a non-existent session, then delete
-      // the original session. ON DELETE CASCADE would otherwise silently remove the inbound.
-      await sql.unsafe(`SET session_replication_role = 'replica'`);
-      await sql`UPDATE inbound_messages SET target_session_id = ${randomUUID()} WHERE id = ${inboundResult.value}`;
-      await sql.unsafe(`SET session_replication_role = 'origin'`);
+      // Reroute the inbound to a non-existent session. Must happen inside a single
+      // transaction so SET LOCAL applies to the same connection as the UPDATE —
+      // a pool can assign different connections across separate sql() calls.
+      const ghostId = randomUUID();
+      await sql.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL session_replication_role = 'replica'`);
+        await tx`UPDATE inbound_messages SET target_session_id = ${ghostId} WHERE id = ${inboundResult.value}`;
+      });
+      // Inbound no longer references sessionId, so DELETE won't cascade to it.
       await sql`DELETE FROM sessions WHERE id = ${sessionId}`;
 
       const workItem: WorkItem = {
