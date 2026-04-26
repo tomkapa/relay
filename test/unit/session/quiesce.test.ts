@@ -158,4 +158,142 @@ describe("quiesceSession", () => {
 
     expect(result.ok).toBe(true);
   });
+
+  test("warns and resolves drop when pending ask found but parent_session_id is null", async () => {
+    const { sessionId, agentId, tenantId, chainId, depth } = makeIds();
+    const clock = new FakeClock(2_000_000);
+    const ledgerRowId = randomUUID();
+
+    const sql = makeFakeSql([
+      // session lookup — parent_session_id null (orphan pending — authoring bug)
+      [{ tenant_id: tenantId, closed_at: null, parent_session_id: null }],
+      // readMostRecentUnresolved → orphan pending row
+      [{ id: ledgerRowId, parent_tool_use_id: "toolu_orphan" }],
+      // markResolved UPDATE — no rows returned shape needed
+      [],
+    ]);
+
+    const result = await quiesceSession(sql, clock, {
+      sessionId,
+      tenantId,
+      agentId,
+      chainId,
+      depth,
+      reason: { kind: "loop_end_no_pending" },
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  test("drops reply with parent_not_found when parent row missing", async () => {
+    const { sessionId, agentId, tenantId, chainId, depth } = makeIds();
+    const clock = new FakeClock(2_000_000);
+    const parentSessionId = randomUUID();
+    const ledgerRowId = randomUUID();
+
+    const sql = makeFakeSql([
+      // session lookup — parent_session_id present
+      [{ tenant_id: tenantId, closed_at: null, parent_session_id: parentSessionId }],
+      // readMostRecentUnresolved → pending row
+      [{ id: ledgerRowId, parent_tool_use_id: "toolu_q1" }],
+      // readFinalTurnResponse — return a turn with text content
+      [
+        {
+          response: {
+            content: [{ type: "text", text: "hello back" }],
+            stopReason: "end_turn",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          },
+        },
+      ],
+      // routeAskReplyToParent: parent SELECT closed_at — empty (parent gone)
+      [],
+      // markResolved UPDATE
+      [],
+    ]);
+
+    const result = await quiesceSession(sql, clock, {
+      sessionId,
+      tenantId,
+      agentId,
+      chainId,
+      depth,
+      reason: { kind: "loop_end_no_pending" },
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  test("drops reply with parent_closed when parent row has closed_at set", async () => {
+    const { sessionId, agentId, tenantId, chainId, depth } = makeIds();
+    const clock = new FakeClock(2_000_000);
+    const parentSessionId = randomUUID();
+    const ledgerRowId = randomUUID();
+
+    const sql = makeFakeSql([
+      [{ tenant_id: tenantId, closed_at: null, parent_session_id: parentSessionId }],
+      [{ id: ledgerRowId, parent_tool_use_id: "toolu_q1" }],
+      [
+        {
+          response: {
+            content: [{ type: "text", text: "late reply" }],
+            stopReason: "end_turn",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          },
+        },
+      ],
+      // parent closed
+      [{ closed_at: new Date(1_000_000) }],
+      // markResolved UPDATE
+      [],
+    ]);
+
+    const result = await quiesceSession(sql, clock, {
+      sessionId,
+      tenantId,
+      agentId,
+      chainId,
+      depth,
+      reason: { kind: "loop_end_no_pending" },
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  test("recovers and resolves drop when readFinalTurnResponse throws", async () => {
+    const { sessionId, agentId, tenantId, chainId, depth } = makeIds();
+    const clock = new FakeClock(2_000_000);
+    const parentSessionId = randomUUID();
+    const ledgerRowId = randomUUID();
+
+    let call = 0;
+    const tag = (): Promise<FakeRow[]> => {
+      call++;
+      if (call === 1) {
+        return Promise.resolve([
+          { tenant_id: tenantId, closed_at: null, parent_session_id: parentSessionId },
+        ]);
+      }
+      if (call === 2) {
+        return Promise.resolve([{ id: ledgerRowId, parent_tool_use_id: "toolu_q1" }]);
+      }
+      if (call === 3) {
+        // Simulate DB error inside readFinalTurnResponse — caught by the catch block.
+        return Promise.reject(new Error("connection dropped"));
+      }
+      return Promise.resolve([]);
+    };
+    const sql = tag as unknown as Sql;
+
+    const result = await quiesceSession(sql, clock, {
+      sessionId,
+      tenantId,
+      agentId,
+      chainId,
+      depth,
+      reason: { kind: "loop_end_no_pending" },
+    });
+
+    expect(result.ok).toBe(true);
+  });
 });
