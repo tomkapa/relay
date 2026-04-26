@@ -173,15 +173,17 @@ describe("parseTaskRow — error cases", () => {
 
 const VALID_UUID_PARENT = "660e8400-e29b-41d4-a716-446655440001";
 const VALID_UUID_CHAIN = "770e8400-e29b-41d4-a716-446655440002";
+const VALID_UUID_CHILD = "880e8400-e29b-41d4-a716-446655440003";
 
 describe("parseEnvelopePayload — parent-link fields (ask-spawned child)", () => {
-  test("accepts message payload with all parent-link fields", () => {
+  test("accepts message payload with all parent-link fields including childSessionId", () => {
     const r = parseEnvelopePayload(
       validMessagePayload({
         parentSessionId: VALID_UUID_PARENT,
         parentChainId: VALID_UUID_CHAIN,
         parentDepth: 1,
         parentToolUseId: "toolu_ask_01",
+        childSessionId: VALID_UUID_CHILD,
       }),
     );
     expect(r.ok).toBe(true);
@@ -192,6 +194,7 @@ describe("parseEnvelopePayload — parent-link fields (ask-spawned child)", () =
     expect(r.value.parentChainId as string).toBe(VALID_UUID_CHAIN);
     expect(r.value.parentDepth as number).toBe(1);
     expect(r.value.parentToolUseId as string).toBe("toolu_ask_01");
+    expect(r.value.childSessionId as string).toBe(VALID_UUID_CHILD);
   });
 
   test("rejects when parentSessionId present but parentChainId missing", () => {

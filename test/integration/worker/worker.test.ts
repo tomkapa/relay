@@ -88,6 +88,7 @@ describeOrSkip("worker (integration)", () => {
         session_start: onItem,
         task_fire: onItem,
         inbound_message: onItem,
+        cascade_close: onItem,
       };
 
       const queue = makeWorkerQueue(sql);
@@ -159,7 +160,12 @@ describeOrSkip("worker (integration)", () => {
           }
           return Promise.resolve(ok(undefined));
         };
-        return { session_start: handler, task_fire: handler, inbound_message: handler };
+        return {
+          session_start: handler,
+          task_fire: handler,
+          inbound_message: handler,
+          cascade_close: handler,
+        };
       }
 
       const queueA = makeWorkerQueue(sql);
@@ -230,6 +236,7 @@ describeOrSkip("worker (integration)", () => {
           return ok(undefined);
         },
         inbound_message: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
+        cascade_close: (): Promise<Result<void, HandlerError>> => Promise.resolve(ok(undefined)),
       };
 
       const queueA = makeWorkerQueue(sql);
@@ -261,6 +268,7 @@ describeOrSkip("worker (integration)", () => {
         session_start: onDetect,
         task_fire: onDetect,
         inbound_message: onDetect,
+        cascade_close: onDetect,
       };
 
       // Let B poll for 2 * renewMs — the lease should still be held by A.

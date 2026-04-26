@@ -15,6 +15,7 @@ export const describeOrSkip = DB_URL ? describe : describe.skip;
 
 export async function resetDb(s: Sql): Promise<void> {
   await s.unsafe(`
+    DROP TABLE IF EXISTS session_pending_asks CASCADE;
     DROP TABLE IF EXISTS pending_system_messages CASCADE;
     DROP TABLE IF EXISTS hook_audit CASCADE;
     DROP TABLE IF EXISTS inbound_messages CASCADE;
