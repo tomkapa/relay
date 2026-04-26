@@ -65,7 +65,7 @@ export function idempotencyKeyForAskReply(input: {
 // Bits 4-7 of group 3 are fixed to '4' (version) and bits 6-7 of group 4 are fixed to '10'
 // (RFC 4122 variant), overwriting those nibbles from the hash.
 export function idempotencyKeyToUuid(key: IdempotencyKey): string {
-  const h = key as string; // 64 hex chars
+  const h = key; // 64 hex chars
   const p1 = h.slice(0, 8);
   const p2 = h.slice(8, 12);
   const p3 = `4${h.slice(13, 16)}`; // version nibble = 4

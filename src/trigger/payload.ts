@@ -13,6 +13,7 @@ import {
   ToolUseId,
   type AgentId as AgentIdBrand,
   type ChainId as ChainIdBrand,
+  type Depth as DepthBrand,
   type SessionId as SessionIdBrand,
   type TaskId as TaskIdBrand,
   type ToolUseId as ToolUseIdBrand,
@@ -40,7 +41,7 @@ export type TriggerPayload =
       // Optional parent-link fields — present when this message originates from an ask() call.
       readonly parentSessionId?: SessionIdBrand;
       readonly parentChainId?: ChainIdBrand;
-      readonly parentDepth?: number;
+      readonly parentDepth?: DepthBrand;
       readonly parentToolUseId?: ToolUseIdBrand;
     }
   | {
@@ -171,13 +172,14 @@ export function parseEnvelopePayload(
       if (!depthResult.ok) {
         return err({ kind: "depth_invalid", reason: depthResult.error.kind });
       }
-      const toolUseIdResult =
-        body.parentToolUseId !== undefined
-          ? ToolUseId.parse(body.parentToolUseId)
-          : ({ ok: false } as const);
-      const parentToolUseId: ToolUseIdBrand | undefined = toolUseIdResult.ok
-        ? toolUseIdResult.value
-        : undefined;
+      let parentToolUseId: ToolUseIdBrand | undefined;
+      if (body.parentToolUseId !== undefined) {
+        const toolUseIdResult = ToolUseId.parse(body.parentToolUseId);
+        if (!toolUseIdResult.ok) {
+          return err({ kind: "tool_use_id_invalid", reason: toolUseIdResult.error.kind });
+        }
+        parentToolUseId = toolUseIdResult.value;
+      }
 
       return ok({
         ...base,

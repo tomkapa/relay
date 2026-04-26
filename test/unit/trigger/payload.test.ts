@@ -190,7 +190,7 @@ describe("parseEnvelopePayload — parent-link fields (ask-spawned child)", () =
     if (r.value.kind !== "message") return;
     expect(r.value.parentSessionId as string).toBe(VALID_UUID_PARENT);
     expect(r.value.parentChainId as string).toBe(VALID_UUID_CHAIN);
-    expect(r.value.parentDepth).toBe(1);
+    expect(r.value.parentDepth as number).toBe(1);
     expect(r.value.parentToolUseId as string).toBe("toolu_ask_01");
   });
 
