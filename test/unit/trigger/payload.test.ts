@@ -170,3 +170,76 @@ describe("parseTaskRow — error cases", () => {
     expect(r.error.kind).toBe("task_id_invalid");
   });
 });
+
+const VALID_UUID_PARENT = "660e8400-e29b-41d4-a716-446655440001";
+const VALID_UUID_CHAIN = "770e8400-e29b-41d4-a716-446655440002";
+
+describe("parseEnvelopePayload — parent-link fields (ask-spawned child)", () => {
+  test("accepts message payload with all parent-link fields", () => {
+    const r = parseEnvelopePayload(
+      validMessagePayload({
+        parentSessionId: VALID_UUID_PARENT,
+        parentChainId: VALID_UUID_CHAIN,
+        parentDepth: 1,
+        parentToolUseId: "toolu_ask_01",
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.kind).toBe("message");
+    if (r.value.kind !== "message") return;
+    expect(r.value.parentSessionId as string).toBe(VALID_UUID_PARENT);
+    expect(r.value.parentChainId as string).toBe(VALID_UUID_CHAIN);
+    expect(r.value.parentDepth).toBe(1);
+    expect(r.value.parentToolUseId as string).toBe("toolu_ask_01");
+  });
+
+  test("rejects when parentSessionId present but parentChainId missing", () => {
+    const r = parseEnvelopePayload(
+      validMessagePayload({
+        parentSessionId: VALID_UUID_PARENT,
+        parentDepth: 1,
+        // parentChainId omitted → Depth.parse called on "" chain ID → chain_id_invalid
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("chain_id_invalid");
+  });
+
+  test("rejects when parentSessionId present but parentDepth missing", () => {
+    const r = parseEnvelopePayload(
+      validMessagePayload({
+        parentSessionId: VALID_UUID_PARENT,
+        parentChainId: VALID_UUID_CHAIN,
+        // parentDepth omitted
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("depth_invalid");
+  });
+
+  test("rejects invalid parentSessionId UUID", () => {
+    const r = parseEnvelopePayload(
+      validMessagePayload({
+        parentSessionId: "not-a-uuid",
+        parentChainId: VALID_UUID_CHAIN,
+        parentDepth: 0,
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    // Zod schema uses z.uuid() which rejects non-UUID → validation_failed
+    expect(r.error.kind).toBe("validation_failed");
+  });
+
+  test("omitting all parent-link fields yields a base message payload", () => {
+    const r = parseEnvelopePayload(validMessagePayload());
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    if (r.value.kind !== "message") return;
+    expect(r.value.parentSessionId).toBeUndefined();
+    expect(r.value.parentToolUseId).toBeUndefined();
+  });
+});

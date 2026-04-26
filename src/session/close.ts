@@ -9,11 +9,12 @@ import { firstRow } from "../db/utils.ts";
 import {
   SessionId,
   TenantId,
+  ToolUseId,
   WorkItemId,
   type AgentId,
   type SessionId as SessionIdBrand,
   type TenantId as TenantIdBrand,
-  type ToolUseId,
+  type ToolUseId as ToolUseIdBrand,
 } from "../ids.ts";
 import { idempotencyKeyForAskReply, idempotencyKeyToUuid } from "../core/idempotency.ts";
 import { Attr, SpanName, counter, emit, withSpan } from "../telemetry/otel.ts";
@@ -158,10 +159,14 @@ export async function closeSession(
 
         // Route ask reply to parent session if this is an ask-spawned child.
         if (row.parent_session_id !== null && row.parent_tool_use_id !== null) {
+          const toolUseIdResult = ToolUseId.parse(row.parent_tool_use_id);
+          assert(toolUseIdResult.ok, "closeSession: invalid parent_tool_use_id from DB", {
+            id: row.parent_tool_use_id,
+          });
           await routeAskReplyOnClose(sql, clock, {
             childSessionId: spec.sessionId,
             parentSessionId: row.parent_session_id,
-            parentToolUseId: row.parent_tool_use_id,
+            parentToolUseId: toolUseIdResult.value,
             tenantId: spec.tenantId,
             childAgentId: spec.agentId,
           });
@@ -201,7 +206,7 @@ async function routeAskReplyOnClose(
   spec: {
     readonly childSessionId: SessionIdBrand;
     readonly parentSessionId: string;
-    readonly parentToolUseId: string;
+    readonly parentToolUseId: ToolUseIdBrand;
     readonly tenantId: TenantIdBrand;
     readonly childAgentId: AgentId;
   },
@@ -255,7 +260,7 @@ async function routeAskReplyOnClose(
       content: finalText,
       receivedAt: now,
       sourceWorkItemId: syntheticWorkItemId,
-      sourceToolUseId: spec.parentToolUseId as unknown as ToolUseId,
+      sourceToolUseId: spec.parentToolUseId,
     });
     if (!inboundResult.ok) {
       emit("WARN", "session.ask_reply.write_inbound_failed", {

@@ -165,8 +165,12 @@ export async function loadResumeInput(
           }
         }
 
-        // The suspended turn has no tool_results persisted; the last message pushed was the
-        // assistant message. Append the newly built tool_result user message for the ask slots.
+        // If the loop pushed a partial tool_results message for the suspended turn (from
+        // the regular tools that were already resolved), remove it — the combined message
+        // below supersedes it with the full set (regular + ask replies).
+        if (lastParsed.tools.length > 0) {
+          messages.pop();
+        }
         messages.push({ role: "user", content: toolResultBlocks });
 
         // If the triggering inbound is not itself an ask-reply, append it as plain user-text.

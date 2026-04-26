@@ -378,6 +378,90 @@ describe("loadResumeInput — ask-resume path", () => {
     expect(blockC.toolUseId as string).toBe(ASK_TOOL_USE_ID_C);
   });
 
+  test("mixed regular tool + ask: stored tool_result used for regular, inbound used for ask", async () => {
+    const REGULAR_ID = "toolu_regular_01";
+    const ASK_ID = "toolu_ask_01";
+    const { ToolUseId } = await import("../../../src/ids.ts");
+    const askIdResult = ToolUseId.parse(ASK_ID);
+    expect(askIdResult.ok).toBe(true);
+    if (!askIdResult.ok) return;
+
+    const mixedTurnRow: unknown = {
+      turn_index: 0,
+      response: {
+        content: [
+          { type: "tool_use", id: REGULAR_ID, name: "echo", input: {} },
+          { type: "tool_use", id: ASK_ID, name: "ask", input: {} },
+        ],
+        stopReason: "tool_use",
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+      // Regular tool is paired; ask tool is not.
+      tool_results: [{ type: "tool_result", toolUseId: REGULAR_ID, content: "echo result" }],
+    };
+    const inboundRow = { source_tool_use_id: ASK_ID, content: "ask reply" };
+    const sql = makeSql({ rows: [sessRow()] }, { rows: [mixedTurnRow] }, { rows: [inboundRow] });
+
+    const result = await loadResumeInput(sql, {
+      sessionId: SESS_ID,
+      tenantId: TENANT_ID,
+      agentSystemPrompt: SYS_PROMPT,
+      inboundContent: "ask reply",
+      inboundMessageId: INBOUND_ID,
+      sourceToolUseId: askIdResult.value,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const msgs = result.value.initialMessages;
+    // opening_user + assistant + user(2 tool_results)
+    expect(msgs).toHaveLength(3);
+    const toolResultMsg = msgs[2];
+    expect(toolResultMsg?.content).toHaveLength(2);
+    const blockR = toolResultMsg?.content[0];
+    const blockA = toolResultMsg?.content[1];
+    expect(blockR?.type).toBe("tool_result");
+    if (blockR?.type === "tool_result") expect(blockR.content).toBe("echo result");
+    expect(blockA?.type).toBe("tool_result");
+    if (blockA?.type === "tool_result") expect(blockA.content).toBe("ask reply");
+  });
+
+  test("ask not in inbound DB: tool_result has <no reply yet>, inboundContent appended", async () => {
+    const { ToolUseId } = await import("../../../src/ids.ts");
+    const askIdResult = ToolUseId.parse(ASK_TOOL_USE_ID);
+    expect(askIdResult.ok).toBe(true);
+    if (!askIdResult.ok) return;
+
+    // No inbound rows in DB (not written yet / race condition)
+    const sql = makeSql(
+      { rows: [sessRow()] },
+      { rows: [askTurnRow(ASK_TOOL_USE_ID)] },
+      { rows: [] },
+    );
+
+    const result = await loadResumeInput(sql, {
+      sessionId: SESS_ID,
+      tenantId: TENANT_ID,
+      agentSystemPrompt: SYS_PROMPT,
+      inboundContent: "direct message",
+      inboundMessageId: INBOUND_ID,
+      sourceToolUseId: askIdResult.value,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const msgs = result.value.initialMessages;
+    // opening_user + assistant + user(ask tool_result "<no reply yet>") + user(plain text)
+    expect(msgs).toHaveLength(4);
+    const toolResultMsg = msgs[2];
+    const block = toolResultMsg?.content[0];
+    if (block?.type === "tool_result") expect(block.content).toBe("<no reply yet>");
+    const plainMsg = msgs[3];
+    expect(plainMsg?.role).toBe("user");
+    const plainBlock = plainMsg?.content[0];
+    if (plainBlock?.type === "text") expect(plainBlock.text).toBe("direct message");
+  });
+
   test("sourceToolUseId null on session with ask turn: falls back to plain-text wrapping", async () => {
     const sql = makeSql(
       { rows: [sessRow()] },

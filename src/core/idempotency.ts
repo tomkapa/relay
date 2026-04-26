@@ -1,7 +1,7 @@
 import { assert } from "./assert.ts";
 import type { Brand } from "./brand.ts";
 import { sha256Hex } from "./hash.ts";
-import type { AgentId, SessionId, TurnId } from "../ids.ts";
+import type { AgentId, SessionId, ToolUseId, TurnId } from "../ids.ts";
 
 export type IdempotencyKey = Brand<string, "IdempotencyKey">;
 
@@ -52,7 +52,7 @@ export function idempotencyKeyForAgentSeed(input: {
 // use id form a globally unique pair, so no turnId is needed here (close has no turn id).
 export function idempotencyKeyForAskReply(input: {
   readonly childSessionId: SessionId;
-  readonly parentToolUseId: string;
+  readonly parentToolUseId: ToolUseId;
 }): IdempotencyKey {
   assert(input.parentToolUseId.length > 0, "idempotencyKeyForAskReply: parentToolUseId empty");
   return sha256Hex(
