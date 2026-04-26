@@ -69,6 +69,7 @@ export type TriggerPayloadError =
   | { kind: "tool_use_id_invalid"; reason: string }
   | { kind: "depth_invalid"; reason: string }
   | { kind: "task_id_invalid"; reason: string }
+  | { kind: "parent_link_invalid"; reason: string }
   | { kind: "envelope_too_large"; bytes: number; max: number };
 
 export type TaskRow = {
@@ -161,7 +162,10 @@ export function parseEnvelopePayload(
       if (!sessionResult.ok) {
         return err({ kind: "session_id_invalid", reason: sessionResult.error.kind });
       }
-      const chainResult = ChainId.parse(body.parentChainId ?? "");
+      if (body.parentChainId === undefined) {
+        return err({ kind: "chain_id_invalid", reason: "parentChainId required with parentSessionId" });
+      }
+      const chainResult = ChainId.parse(body.parentChainId);
       if (!chainResult.ok) {
         return err({ kind: "chain_id_invalid", reason: chainResult.error.kind });
       }
@@ -187,6 +191,17 @@ export function parseEnvelopePayload(
         parentChainId: chainResult.value,
         parentDepth: depthResult.value,
         ...(parentToolUseId !== undefined ? { parentToolUseId } : {}),
+      });
+    }
+
+    if (
+      body.parentChainId !== undefined ||
+      body.parentDepth !== undefined ||
+      body.parentToolUseId !== undefined
+    ) {
+      return err({
+        kind: "parent_link_invalid",
+        reason: "parentSessionId required when parentChainId/parentDepth/parentToolUseId provided",
       });
     }
 

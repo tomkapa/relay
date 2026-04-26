@@ -13,6 +13,7 @@ export type IdempotencyKeyInput = {
 };
 
 const KEY_DIGEST_RE = /^[0-9a-f]{64}$/;
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_TOOL_CALL_ID_LEN = 128;
 
 export function idempotencyKey(input: IdempotencyKeyInput): IdempotencyKey {
@@ -65,12 +66,15 @@ export function idempotencyKeyForAskReply(input: {
 // Bits 4-7 of group 3 are fixed to '4' (version) and bits 6-7 of group 4 are fixed to '10'
 // (RFC 4122 variant), overwriting those nibbles from the hash.
 export function idempotencyKeyToUuid(key: IdempotencyKey): string {
-  const h = key; // 64 hex chars
-  const p1 = h.slice(0, 8);
-  const p2 = h.slice(8, 12);
-  const p3 = `4${h.slice(13, 16)}`; // version nibble = 4
-  const variantByte = ((parseInt(h.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, "0");
-  const p4 = `${variantByte}${h.slice(18, 20)}`;
-  const p5 = h.slice(20, 32);
-  return `${p1}-${p2}-${p3}-${p4}-${p5}`;
+  assert(KEY_DIGEST_RE.test(key), "idempotencyKeyToUuid: key must be 64-char lowercase hex", {
+    keyLength: key.length,
+  });
+  // key[12] (original version nibble) is overwritten by '4'; key[13-15] are preserved.
+  const p3 = `4${key.slice(13, 16)}`;
+  const variantByte = ((parseInt(key.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, "0");
+  const uuid = `${key.slice(0, 8)}-${key.slice(8, 12)}-${p3}-${variantByte}${key.slice(18, 20)}-${key.slice(20, 32)}`;
+  assert(UUID_V4_RE.test(uuid), "idempotencyKeyToUuid: output is not a canonical UUID v4 variant-1", {
+    uuid,
+  });
+  return uuid;
 }

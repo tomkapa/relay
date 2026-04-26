@@ -9,10 +9,10 @@ import { err, ok, type Result } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
 import {
   TenantId,
+  ToolUseId,
   type InboundMessageId,
   type SessionId,
   type TenantId as TenantIdBrand,
-  type ToolUseId,
 } from "../ids.ts";
 import type { ContentBlock, Message, ToolResultBlock } from "./turn.ts";
 import { ModelResponseSchema, ToolResultBlockSchema } from "./turn-schema.ts";
@@ -43,6 +43,12 @@ type InboundAskRow = {
   readonly source_tool_use_id: string;
   readonly content: string;
 };
+type ParsedTurnData = {
+  resp: ReturnType<(typeof ModelResponseSchema)["parse"]>;
+  tools: ReturnType<(typeof ToolResultsSchema)["parse"]>;
+};
+// Unbranded tool_use block as it comes out of ModelResponseSchema (id is raw string, not ToolUseId).
+type ToolUseShape = { type: "tool_use"; id: string; name: string; input: unknown };
 
 export async function loadResumeInput(
   sql: Sql,
@@ -88,11 +94,6 @@ export async function loadResumeInput(
     { role: "user", content: [{ type: "text", text: sess.opening_user_content }] },
   ];
 
-  // Cache parsed results from the last iteration — reused in the ask-resume path below.
-  type ParsedTurnData = {
-    resp: ReturnType<(typeof ModelResponseSchema)["parse"]>;
-    tools: ReturnType<(typeof ToolResultsSchema)["parse"]>;
-  };
   let lastParsed: ParsedTurnData | null = null;
 
   let expectedIndex = 0;
@@ -128,14 +129,15 @@ export async function loadResumeInput(
   // Only attempt ask-resume path when sourceToolUseId is non-null (caller flagged it as ask-reply)
   // and there is at least one prior turn (the suspended one).
   if (params.sourceToolUseId !== null && lastParsed !== null) {
-    type ToolUseShape = { type: "tool_use"; id: string; name: string; input: unknown };
     const lastToolUses = lastParsed.resp.content.filter(
       (b): b is ToolUseShape => b.type === "tool_use",
     );
 
     if (lastToolUses.length > 0) {
-      const pairedIds = new Set(lastParsed.tools.map((tr) => tr.toolUseId));
-      const unansweredIds = lastToolUses.map((b) => b.id).filter((id) => !pairedIds.has(id));
+      const pairedMap = new Map<string, ToolResultBlock>(
+        lastParsed.tools.map((tr) => [tr.toolUseId, tr as ToolResultBlock]),
+      );
+      const unansweredIds = lastToolUses.map((b) => b.id).filter((id) => !pairedMap.has(id));
 
       if (unansweredIds.length > 0) {
         const inboundRows = await sql<InboundAskRow[]>`
@@ -151,15 +153,20 @@ export async function loadResumeInput(
 
         const toolResultBlocks: ToolResultBlock[] = [];
         for (const toolUse of lastToolUses) {
-          if (pairedIds.has(toolUse.id)) {
-            const stored = lastParsed.tools.find((tr) => tr.toolUseId === toolUse.id);
+          if (pairedMap.has(toolUse.id)) {
+            const stored = pairedMap.get(toolUse.id);
             assert(stored !== undefined, "loadResumeInput: paired tool result must exist");
-            toolResultBlocks.push(stored as ToolResultBlock);
+            toolResultBlocks.push(stored);
           } else {
-            const replyContent = inboundMap.get(toolUse.id);
+            const toolUseIdResult = ToolUseId.parse(toolUse.id);
+            assert(toolUseIdResult.ok, "loadResumeInput: invalid tool_use id from DB", {
+              id: toolUse.id,
+            });
+            const toolUseId = toolUseIdResult.value;
+            const replyContent = inboundMap.get(toolUseId);
             toolResultBlocks.push({
               type: "tool_result",
-              toolUseId: toolUse.id as ToolUseId,
+              toolUseId,
               content: replyContent ?? "<no reply yet>",
             });
           }

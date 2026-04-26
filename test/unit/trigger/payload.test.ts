@@ -199,7 +199,7 @@ describe("parseEnvelopePayload — parent-link fields (ask-spawned child)", () =
       validMessagePayload({
         parentSessionId: VALID_UUID_PARENT,
         parentDepth: 1,
-        // parentChainId omitted → Depth.parse called on "" chain ID → chain_id_invalid
+        // parentChainId omitted
       }),
     );
     expect(r.ok).toBe(false);
@@ -241,5 +241,30 @@ describe("parseEnvelopePayload — parent-link fields (ask-spawned child)", () =
     if (r.value.kind !== "message") return;
     expect(r.value.parentSessionId).toBeUndefined();
     expect(r.value.parentToolUseId).toBeUndefined();
+  });
+
+  test("rejects parentChainId without parentSessionId", () => {
+    const r = parseEnvelopePayload(
+      validMessagePayload({ parentChainId: VALID_UUID_CHAIN }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("parent_link_invalid");
+  });
+
+  test("rejects parentDepth without parentSessionId", () => {
+    const r = parseEnvelopePayload(validMessagePayload({ parentDepth: 1 }));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("parent_link_invalid");
+  });
+
+  test("rejects parentToolUseId without parentSessionId", () => {
+    const r = parseEnvelopePayload(
+      validMessagePayload({ parentToolUseId: "toolu_ask_01" }),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("parent_link_invalid");
   });
 });

@@ -12,10 +12,8 @@ import {
   Depth,
   EnvelopeId,
   InboundMessageId,
-  SessionId,
   TaskId,
   TenantId,
-  ToolUseId,
   mintId,
 } from "../ids.ts";
 import type {
@@ -179,6 +177,8 @@ function mapPayloadError(e: TriggerPayloadError): HandlerError {
       return { kind: "handler_failed", reason: `invalid depth: ${e.reason}` };
     case "task_id_invalid":
       return { kind: "handler_failed", reason: `invalid task_id: ${e.reason}` };
+    case "parent_link_invalid":
+      return { kind: "handler_failed", reason: `invalid parent link: ${e.reason}` };
     case "envelope_too_large":
       return {
         kind: "handler_failed",
@@ -401,40 +401,21 @@ async function handleSessionStart(
 
       if (payload.kind === "message" && payload.parentSessionId !== undefined) {
         // Child session spawned by an ask() call — inherit chain, increment depth.
-        const pDepth = payload.parentDepth ?? 0;
-        const childDepthResult = Depth.parse(pDepth + 1);
+        // parentChainId and parentDepth are guaranteed present by parseEnvelopePayload when parentSessionId is set.
+        assert(payload.parentChainId !== undefined, "handleSessionStart: parentChainId missing despite parentSessionId");
+        assert(payload.parentDepth !== undefined, "handleSessionStart: parentDepth missing despite parentSessionId");
+        const childDepthResult = Depth.parse(payload.parentDepth + 1);
         if (!childDepthResult.ok) {
           return err<HandlerError>({
             kind: "handler_failed",
-            reason: `depth cap exceeded: parentDepth=${pDepth.toString()}`,
+            reason: `depth cap exceeded: parentDepth=${payload.parentDepth.toString()}`,
           });
         }
-        const parentChainIdResult = ChainId.parse(payload.parentChainId ?? "");
-        if (!parentChainIdResult.ok) {
-          return err<HandlerError>({
-            kind: "handler_failed",
-            reason: `invalid parentChainId: ${parentChainIdResult.error.kind}`,
-          });
-        }
-        const parentSessionIdResult = SessionId.parse(payload.parentSessionId);
-        if (!parentSessionIdResult.ok) {
-          return err<HandlerError>({
-            kind: "handler_failed",
-            reason: `invalid parentSessionId: ${parentSessionIdResult.error.kind}`,
-          });
-        }
-        chainId = parentChainIdResult.value;
+        chainId = payload.parentChainId;
         depth = childDepthResult.value;
-        parentSessionId = parentSessionIdResult.value;
+        parentSessionId = payload.parentSessionId;
         if (payload.parentToolUseId !== undefined) {
-          const toolUseIdResult = ToolUseId.parse(payload.parentToolUseId);
-          if (!toolUseIdResult.ok) {
-            return err<HandlerError>({
-              kind: "handler_failed",
-              reason: `invalid parentToolUseId: ${toolUseIdResult.error.kind}`,
-            });
-          }
-          parentToolUseId = toolUseIdResult.value;
+          parentToolUseId = payload.parentToolUseId;
         }
       } else {
         const minted = mintChainAndDepth();
