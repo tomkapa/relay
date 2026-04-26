@@ -420,6 +420,8 @@ describe("emitSessionSyncClose", () => {
           closed_at: null,
           created_at: new Date(1_000_000),
           envelope_id: "00000000-0000-4000-8000-000000000001",
+          parent_session_id: null,
+          parent_tool_use_id: null,
         },
       ],
       [{ closed_at: new Date(nowMs) }],
