@@ -19,6 +19,7 @@ function validRow(overrides: Partial<InboundMessageRow> = {}): InboundMessageRow
     kind: "message",
     content: "Hello there",
     received_at: new Date("2026-04-22T00:00:00.000Z"),
+    source_tool_use_id: null,
     ...overrides,
   };
 }

@@ -35,6 +35,7 @@ const baseSpec = {
   content: "hello",
   receivedAt: new Date(0),
   sourceWorkItemId: VALID_UUID_C as WorkItemId,
+  sourceToolUseId: null,
 };
 
 describe("writeInboundMessage — boundary validation", () => {

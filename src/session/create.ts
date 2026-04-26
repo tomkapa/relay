@@ -16,6 +16,7 @@ import {
   type Depth,
   type SessionId as SessionIdBrand,
   type TenantId as TenantIdBrand,
+  type ToolUseId as ToolUseIdBrand,
   type WorkItemId,
 } from "../ids.ts";
 import { Attr, SpanName, withSpan } from "../telemetry/otel.ts";
@@ -32,6 +33,7 @@ export type CreateSessionSpec = Readonly<{
   openingContext: readonly TranscriptEntry[]; // computed by trigger synthesizer; passed to runTurnLoop (RELAY-8)
   sourceWorkItemId: WorkItemId;
   openingUserContent: string; // rendered user text persisted for transcript reload on resume
+  parentToolUseId: ToolUseIdBrand | null; // non-null only for ask-spawned child sessions
 }>;
 
 export type SessionCreateError =
@@ -75,11 +77,16 @@ async function insertSession(
   spec: CreateSessionSpec,
   createdAt: Date,
 ): Promise<SessionIdBrand | null> {
+  assert(
+    spec.parentToolUseId === null || spec.parentToolUseId.length > 0,
+    "insertSession: parentToolUseId must be non-empty when set",
+  );
   const rows = await tx<InsertRow[]>`
     INSERT INTO sessions (
       id, agent_id, tenant_id, originating_trigger,
       parent_session_id, chain_id, depth,
       source_work_item_id, opening_user_content,
+      parent_tool_use_id,
       created_at, updated_at
     )
     VALUES (
@@ -92,6 +99,7 @@ async function insertSession(
       ${spec.depth as number},
       ${spec.sourceWorkItemId},
       ${spec.openingUserContent},
+      ${spec.parentToolUseId},
       ${createdAt},
       ${createdAt}
     )

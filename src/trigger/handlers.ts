@@ -14,6 +14,7 @@ import type {
   Depth as DepthBrand,
   SessionId as SessionIdBrand,
   TenantId as TenantIdBrand,
+  ToolUseId as ToolUseIdBrand,
 } from "../ids.ts";
 import { Attr, SpanName, counter, emit, withSpan } from "../telemetry/otel.ts";
 import type { Dispatcher, HandlerError } from "../worker/dispatcher.ts";
@@ -39,7 +40,7 @@ import type { EmbeddingClient } from "../memory/embedding.ts";
 import { EMBEDDING_CALL_TIMEOUT_MS } from "../memory/limits.ts";
 import type { ModelClient } from "../session/model.ts";
 import type { ToolRegistry } from "../session/tools.ts";
-import { runTurnLoop } from "../session/turn-loop.ts";
+import { runTurnLoop, type LoopOutcome } from "../session/turn-loop.ts";
 import { runHooks } from "../hook/run.ts";
 import { snapshotHookConfig } from "../hook/snapshot.ts";
 import { HOOK_EVENT } from "../hook/types.ts";
@@ -77,10 +78,21 @@ export function openingContextToLoopInput(
 
 type LoopTermination =
   | { kind: "close"; reason: SessionEndReason }
+  | { kind: "suspend" }
   | { kind: "retry"; handlerError: HandlerError };
 
 function classifyLoopResult(result: Awaited<ReturnType<typeof runTurnLoop>>): LoopTermination {
-  if (result.ok) return { kind: "close", reason: { kind: "end_turn" } };
+  if (result.ok) {
+    const outcome: LoopOutcome = result.value;
+    switch (outcome.kind) {
+      case "completed":
+        return { kind: "close", reason: { kind: "end_turn" } };
+      case "suspended":
+        return { kind: "suspend" };
+      default:
+        throw unreachable(outcome);
+    }
+  }
   const e = result.error;
   switch (e.kind) {
     case "turn_cap_exceeded":
@@ -109,6 +121,11 @@ function classifyLoopResult(result: Awaited<ReturnType<typeof runTurnLoop>>): Lo
       return {
         kind: "retry",
         handlerError: { kind: "handler_failed", reason: `persist_turn_failed: ${e.detail}` },
+      };
+    case "dispatch_failed":
+      return {
+        kind: "retry",
+        handlerError: { kind: "handler_failed", reason: `dispatch_failed: ${e.detail}` },
       };
     default:
       throw unreachable(e);
@@ -142,8 +159,18 @@ function mapPayloadError(e: TriggerPayloadError): HandlerError {
       return { kind: "handler_failed", reason: `unknown payload kind: ${e.value}` };
     case "agent_id_invalid":
       return { kind: "handler_failed", reason: `invalid agent_id: ${e.reason}` };
+    case "session_id_invalid":
+      return { kind: "handler_failed", reason: `invalid session_id: ${e.reason}` };
+    case "chain_id_invalid":
+      return { kind: "handler_failed", reason: `invalid chain_id: ${e.reason}` };
+    case "tool_use_id_invalid":
+      return { kind: "handler_failed", reason: `invalid tool_use_id: ${e.reason}` };
+    case "depth_invalid":
+      return { kind: "handler_failed", reason: `invalid depth: ${e.reason}` };
     case "task_id_invalid":
       return { kind: "handler_failed", reason: `invalid task_id: ${e.reason}` };
+    case "parent_link_invalid":
+      return { kind: "handler_failed", reason: `invalid parent link: ${e.reason}` };
     case "envelope_too_large":
       return {
         kind: "handler_failed",
@@ -199,6 +226,8 @@ async function runLoopAndClose(
   item: WorkItem,
   session: { readonly id: SessionIdBrand },
   agentId: AgentIdBrand,
+  chainId: ChainIdBrand,
+  depth: DepthBrand,
   systemPrompt: string,
   initialMessages: readonly Message[],
   startTurnIndex = 0,
@@ -209,12 +238,15 @@ async function runLoopAndClose(
       sessionId: session.id,
       agentId,
       tenantId: item.tenantId,
+      chainId,
+      depth,
       systemPrompt,
       initialMessages,
       startTurnIndex,
     },
   );
   const termination = classifyLoopResult(loopResult);
+
   if (termination.kind === "retry") {
     counter("relay.session.turn_loop_outcome_total").add(1, {
       [Attr.TenantId]: item.tenantId,
@@ -223,6 +255,26 @@ async function runLoopAndClose(
     });
     return err(termination.handlerError);
   }
+
+  if (termination.kind === "suspend") {
+    counter("relay.session.turn_loop_outcome_total").add(1, {
+      [Attr.TenantId]: item.tenantId,
+      [Attr.TriggerKind]: item.kind,
+      [Attr.TurnLoopOutcome]: "suspended",
+    });
+    const pendingAskCount =
+      loopResult.ok && loopResult.value.kind === "suspended"
+        ? loopResult.value.pendingAsks.length
+        : 0;
+    emit("INFO", `trigger.${item.kind}.suspended`, {
+      [Attr.TenantId]: item.tenantId,
+      [Attr.SessionId]: session.id,
+      [Attr.WorkId]: item.id,
+      [Attr.PendingAskCount]: pendingAskCount,
+    });
+    return ok(undefined);
+  }
+
   const closeResult = await closeSession(deps.sql, deps.clock, {
     sessionId: session.id,
     tenantId: item.tenantId,
@@ -333,7 +385,42 @@ async function handleSessionStart(
       const agentResult = await loadAgent(deps.sql, payload.targetAgentId);
       if (!agentResult.ok) return err(mapAgentError(agentResult.error));
 
-      const { chainId, depth } = mintChainAndDepth();
+      // Determine parent linkage from envelope payload fields.
+      let chainId: ChainIdBrand;
+      let depth: DepthBrand;
+      let parentSessionId: SessionIdBrand | null = null;
+      let parentToolUseId: ToolUseIdBrand | null = null;
+
+      if (payload.kind === "message" && payload.parentSessionId !== undefined) {
+        // Child session spawned by an ask() call — inherit chain, increment depth.
+        // parentChainId and parentDepth are guaranteed present by parseEnvelopePayload when parentSessionId is set.
+        assert(
+          payload.parentChainId !== undefined,
+          "handleSessionStart: parentChainId missing despite parentSessionId",
+        );
+        assert(
+          payload.parentDepth !== undefined,
+          "handleSessionStart: parentDepth missing despite parentSessionId",
+        );
+        const childDepthResult = Depth.parse(payload.parentDepth + 1);
+        if (!childDepthResult.ok) {
+          return err<HandlerError>({
+            kind: "handler_failed",
+            reason: `depth cap exceeded: parentDepth=${payload.parentDepth.toString()}`,
+          });
+        }
+        chainId = payload.parentChainId;
+        depth = childDepthResult.value;
+        parentSessionId = payload.parentSessionId;
+        if (payload.parentToolUseId !== undefined) {
+          parentToolUseId = payload.parentToolUseId;
+        }
+      } else {
+        const minted = mintChainAndDepth();
+        chainId = minted.chainId;
+        depth = minted.depth;
+      }
+
       const synthSignal = AbortSignal.any([signal, AbortSignal.timeout(EMBEDDING_CALL_TIMEOUT_MS)]);
       const context = await synthesizeOpeningContext(
         { sql: deps.sql, clock: deps.clock, embedder: deps.embedder },
@@ -353,18 +440,27 @@ async function handleSessionStart(
         agentId: payload.targetAgentId,
         tenantId: item.tenantId,
         originatingTrigger: { kind: payload.kind, envelopeId: envelope.id as string },
-        parentSessionId: null,
+        parentSessionId,
         chainId,
         depth,
         openingContext: context.entries,
         sourceWorkItemId: item.id,
         openingUserContent: context.userText,
+        parentToolUseId,
       });
       if (!sessionResult.ok) return err(mapSessionError(sessionResult.error));
 
       const session = sessionResult.value;
       if (session.isDuplicate) {
-        return finalizeSession(deps, item, session, payload.targetAgentId, chainId, depth, null);
+        return finalizeSession(
+          deps,
+          item,
+          session,
+          payload.targetAgentId,
+          chainId,
+          depth,
+          parentSessionId,
+        );
       }
 
       const { initialMessages } = openingContextToLoopInput(context.entries, enrichedSystemPrompt);
@@ -373,12 +469,22 @@ async function handleSessionStart(
         item,
         session,
         payload.targetAgentId,
+        chainId,
+        depth,
         enrichedSystemPrompt,
         initialMessages,
       );
       if (!loopResult.ok) return loopResult;
 
-      return finalizeSession(deps, item, session, payload.targetAgentId, chainId, depth, null);
+      return finalizeSession(
+        deps,
+        item,
+        session,
+        payload.targetAgentId,
+        chainId,
+        depth,
+        parentSessionId,
+      );
     },
   );
 }
@@ -465,6 +571,7 @@ async function handleTaskFire(
         openingContext: context.entries,
         sourceWorkItemId: item.id,
         openingUserContent: context.userText,
+        parentToolUseId: null,
       });
       if (!sessionResult.ok) return err(mapSessionError(sessionResult.error));
 
@@ -479,6 +586,8 @@ async function handleTaskFire(
         item,
         session,
         payload.agentId,
+        chainId,
+        depth,
         enrichedSystemPrompt,
         initialMessages,
       );
@@ -643,6 +752,8 @@ async function handleInboundMessage(
         tenantId: item.tenantId,
         agentSystemPrompt: targetResult.value.agent.systemPrompt,
         inboundContent: payload.content,
+        inboundMessageId: inboundIdResult.value,
+        sourceToolUseId: payload.sourceToolUseId,
       });
       if (!resumeResult.ok) return err(mapResumeError(resumeResult.error));
 
@@ -662,6 +773,8 @@ async function handleInboundMessage(
         item,
         { id: payload.targetSessionId },
         targetResult.value.session.agentId,
+        targetResult.value.session.chainId,
+        targetResult.value.session.depth,
         resumeResult.value.systemPrompt,
         resumeResult.value.initialMessages,
         resumeResult.value.startTurnIndex,

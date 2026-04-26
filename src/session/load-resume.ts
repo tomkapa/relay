@@ -1,13 +1,19 @@
 // Reload the transcript for a session that is being resumed via an inbound message (RELAY-143).
-// Single-resume only: reads opening_user_content + completed turns + the current inbound.
-// Multi-resume (interleaving prior inbound rows with turns) is RELAY-232.
+// RELAY-144 extends: when the last turn has unanswered ask tool_uses, builds tool_result blocks
+// instead of plain-text wrapping. Multi-resume interleaving (RELAY-232) is not implemented here.
 
 import { z } from "zod";
 import type { Sql } from "postgres";
 import { assert } from "../core/assert.ts";
 import { err, ok, type Result } from "../core/result.ts";
 import { firstRow } from "../db/utils.ts";
-import { TenantId, type SessionId, type TenantId as TenantIdBrand } from "../ids.ts";
+import {
+  TenantId,
+  ToolUseId,
+  type InboundMessageId,
+  type SessionId,
+  type TenantId as TenantIdBrand,
+} from "../ids.ts";
 import type { ContentBlock, Message, ToolResultBlock } from "./turn.ts";
 import { ModelResponseSchema, ToolResultBlockSchema } from "./turn-schema.ts";
 
@@ -33,6 +39,16 @@ type TurnRow = {
   readonly response: unknown;
   readonly tool_results: unknown;
 };
+type InboundAskRow = {
+  readonly source_tool_use_id: string;
+  readonly content: string;
+};
+type ParsedTurnData = {
+  resp: ReturnType<(typeof ModelResponseSchema)["parse"]>;
+  tools: ReturnType<(typeof ToolResultsSchema)["parse"]>;
+};
+// Unbranded tool_use block as it comes out of ModelResponseSchema (id is raw string, not ToolUseId).
+type ToolUseShape = { type: "tool_use"; id: string; name: string; input: unknown };
 
 export async function loadResumeInput(
   sql: Sql,
@@ -41,6 +57,8 @@ export async function loadResumeInput(
     readonly tenantId: TenantIdBrand;
     readonly agentSystemPrompt: string;
     readonly inboundContent: string;
+    readonly inboundMessageId: InboundMessageId;
+    readonly sourceToolUseId: ToolUseId | null;
   },
 ): Promise<Result<ResumeInput, ResumeInputError>> {
   assert(
@@ -76,6 +94,8 @@ export async function loadResumeInput(
     { role: "user", content: [{ type: "text", text: sess.opening_user_content }] },
   ];
 
+  let lastParsed: ParsedTurnData | null = null;
+
   let expectedIndex = 0;
   for (const row of turnRows) {
     assert(row.turn_index === expectedIndex, "loadResumeInput: turns gap or duplicate", {
@@ -84,26 +104,97 @@ export async function loadResumeInput(
     });
     expectedIndex++;
 
-    const respParsed = ModelResponseSchema.safeParse(row.response);
-    assert(respParsed.success, "loadResumeInput: malformed turn.response from DB", {
-      detail: respParsed.error?.message,
+    const resp = ModelResponseSchema.safeParse(row.response);
+    assert(resp.success, "loadResumeInput: malformed turn.response from DB", {
+      detail: resp.error?.message,
     });
 
-    const toolsParsed = ToolResultsSchema.safeParse(row.tool_results);
-    assert(toolsParsed.success, "loadResumeInput: malformed turn.tool_results from DB", {
-      detail: toolsParsed.error?.message,
+    const tools = ToolResultsSchema.safeParse(row.tool_results);
+    assert(tools.success, "loadResumeInput: malformed turn.tool_results from DB", {
+      detail: tools.error?.message,
     });
+
+    lastParsed = { resp: resp.data, tools: tools.data };
 
     // Single boundary cast after Zod validation — brands are TypeScript fictions, shapes match.
     messages.push({
       role: "assistant",
-      content: respParsed.data.content as readonly ContentBlock[],
+      content: resp.data.content as readonly ContentBlock[],
     });
-    if (toolsParsed.data.length > 0) {
-      messages.push({ role: "user", content: toolsParsed.data as ToolResultBlock[] });
+    if (tools.data.length > 0) {
+      messages.push({ role: "user", content: tools.data as ToolResultBlock[] });
     }
   }
 
+  // Only attempt ask-resume path when sourceToolUseId is non-null (caller flagged it as ask-reply)
+  // and there is at least one prior turn (the suspended one).
+  if (params.sourceToolUseId !== null && lastParsed !== null) {
+    const lastToolUses = lastParsed.resp.content.filter(
+      (b): b is ToolUseShape => b.type === "tool_use",
+    );
+
+    if (lastToolUses.length > 0) {
+      const pairedMap = new Map<string, ToolResultBlock>(
+        lastParsed.tools.map((tr) => [tr.toolUseId, tr as ToolResultBlock]),
+      );
+      const unansweredIds = lastToolUses.map((b) => b.id).filter((id) => !pairedMap.has(id));
+
+      if (unansweredIds.length > 0) {
+        const inboundRows = await sql<InboundAskRow[]>`
+          SELECT source_tool_use_id, content
+          FROM inbound_messages
+          WHERE target_session_id = ${params.sessionId}
+            AND source_tool_use_id IS NOT NULL
+            AND source_tool_use_id = ANY(${unansweredIds})
+        `;
+        const inboundMap = new Map<string, string>(
+          inboundRows.map((r) => [r.source_tool_use_id, r.content]),
+        );
+
+        const toolResultBlocks: ToolResultBlock[] = [];
+        for (const toolUse of lastToolUses) {
+          if (pairedMap.has(toolUse.id)) {
+            const stored = pairedMap.get(toolUse.id);
+            assert(stored !== undefined, "loadResumeInput: paired tool result must exist");
+            toolResultBlocks.push(stored);
+          } else {
+            const toolUseIdResult = ToolUseId.parse(toolUse.id);
+            assert(toolUseIdResult.ok, "loadResumeInput: invalid tool_use id from DB", {
+              id: toolUse.id,
+            });
+            const toolUseId = toolUseIdResult.value;
+            const replyContent = inboundMap.get(toolUseId);
+            toolResultBlocks.push({
+              type: "tool_result",
+              toolUseId,
+              content: replyContent ?? "<no reply yet>",
+            });
+          }
+        }
+
+        // If the loop pushed a partial tool_results message for the suspended turn (from
+        // the regular tools that were already resolved), remove it — the combined message
+        // below supersedes it with the full set (regular + ask replies).
+        if (lastParsed.tools.length > 0) {
+          messages.pop();
+        }
+        messages.push({ role: "user", content: toolResultBlocks });
+
+        // If the triggering inbound is not itself an ask-reply, append it as plain user-text.
+        if (!inboundMap.has(params.sourceToolUseId)) {
+          messages.push({ role: "user", content: [{ type: "text", text: params.inboundContent }] });
+        }
+
+        return ok({
+          systemPrompt: params.agentSystemPrompt,
+          initialMessages: messages,
+          startTurnIndex: turnRows.length,
+        });
+      }
+    }
+  }
+
+  // Fresh inbound path: append as plain user-text message.
   messages.push({ role: "user", content: [{ type: "text", text: params.inboundContent }] });
 
   return ok({

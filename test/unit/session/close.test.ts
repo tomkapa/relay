@@ -66,6 +66,8 @@ describe("closeSession", () => {
           closed_at: null,
           created_at: new Date(1_000_000),
           envelope_id: null,
+          parent_session_id: null,
+          parent_tool_use_id: null,
         },
       ],
       [{ closed_at: new Date(nowMs) }],
@@ -158,6 +160,8 @@ describe("closeSession", () => {
           closed_at: null,
           created_at: new Date(1_000_000),
           envelope_id: null,
+          parent_session_id: null,
+          parent_tool_use_id: null,
         },
       ],
       [{ closed_at: new Date(nowMs) }],
@@ -244,6 +248,8 @@ describe("closeSession", () => {
           closed_at: null,
           created_at: new Date(1_000_000),
           envelope_id: null,
+          parent_session_id: null,
+          parent_tool_use_id: null,
         },
       ],
       [{ closed_at: new Date(nowMs) }],
@@ -277,6 +283,119 @@ describe("closeSession", () => {
   });
 });
 
+describe("closeSession — routeAskReplyOnClose via parent linkage", () => {
+  test("routes ask reply to open parent: writes inbound + enqueues work item", async () => {
+    const { sessionId, agentId, tenantId } = ids;
+    const parentSessionId = randomUUID();
+    const nowMs = clock.now();
+
+    const sql = makeFakeSql([
+      // 1. Session lookup — has parent linkage
+      [
+        {
+          tenant_id: tenantId,
+          closed_at: null,
+          created_at: new Date(1_000_000),
+          envelope_id: null,
+          parent_session_id: parentSessionId,
+          parent_tool_use_id: "toolu_ask_01",
+        },
+      ],
+      // 2. UPDATE sessions SET closed_at
+      [{ closed_at: new Date(nowMs) }],
+      // 3. readFinalTurnResponse: SELECT response FROM turns → no rows → fallback text
+      [],
+      // 4. Parent check: SELECT closed_at FROM sessions → parent is open
+      [{ closed_at: null }],
+      // 5. writeInboundMessage: INSERT INTO inbound_messages RETURNING id
+      [{ id: randomUUID() }],
+      // 6. enqueue: WITH candidate AS INSERT INTO work_queue RETURNING id
+      [{ id: randomUUID() }],
+    ]);
+
+    const result = await closeSession(sql, clock, {
+      sessionId,
+      agentId,
+      tenantId,
+      reason: { kind: "end_turn" },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.kind).toBe("closed");
+  });
+
+  test("drops late reply when parent is already closed", async () => {
+    const { sessionId, agentId, tenantId } = ids;
+    const parentSessionId = randomUUID();
+    const nowMs = clock.now();
+
+    const sql = makeFakeSql([
+      [
+        {
+          tenant_id: tenantId,
+          closed_at: null,
+          created_at: new Date(1_000_000),
+          envelope_id: null,
+          parent_session_id: parentSessionId,
+          parent_tool_use_id: "toolu_ask_01",
+        },
+      ],
+      [{ closed_at: new Date(nowMs) }],
+      // readFinalTurnResponse → no turns
+      [],
+      // Parent check → already closed
+      [{ closed_at: new Date(1_000_000) }],
+    ]);
+
+    const result = await closeSession(sql, clock, {
+      sessionId,
+      agentId,
+      tenantId,
+      reason: { kind: "end_turn" },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.kind).toBe("closed");
+  });
+
+  test("drops late reply when parent session is not found", async () => {
+    const { sessionId, agentId, tenantId } = ids;
+    const parentSessionId = randomUUID();
+    const nowMs = clock.now();
+
+    const sql = makeFakeSql([
+      [
+        {
+          tenant_id: tenantId,
+          closed_at: null,
+          created_at: new Date(1_000_000),
+          envelope_id: null,
+          parent_session_id: parentSessionId,
+          parent_tool_use_id: "toolu_ask_01",
+        },
+      ],
+      [{ closed_at: new Date(nowMs) }],
+      // readFinalTurnResponse → no turns
+      [],
+      // Parent check → row not found
+      [],
+    ]);
+
+    const result = await closeSession(sql, clock, {
+      sessionId,
+      agentId,
+      tenantId,
+      reason: { kind: "end_turn" },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.kind).toBe("closed");
+  });
+});
+
 describe("emitSessionSyncClose", () => {
   test("no-op when envelopeId is null", async () => {
     const { sessionId } = ids;
@@ -301,6 +420,8 @@ describe("emitSessionSyncClose", () => {
           closed_at: null,
           created_at: new Date(1_000_000),
           envelope_id: "00000000-0000-4000-8000-000000000001",
+          parent_session_id: null,
+          parent_tool_use_id: null,
         },
       ],
       [{ closed_at: new Date(nowMs) }],

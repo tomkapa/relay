@@ -86,6 +86,8 @@ describe("runTurnLoop", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
+    expect(result.value.kind).toBe("completed");
+    if (result.value.kind !== "completed") return;
     expect(result.value.turns).toHaveLength(1);
     expect(result.value.turns[0]?.toolResults).toHaveLength(0);
     const textBlock = result.value.finalResponse.content[0] as TextBlock;
@@ -785,5 +787,198 @@ describe("hook registry — relay.hook.evaluation_total counter", () => {
 
     const rm = await fixture.collect();
     expect(sumCounter(rm, "relay.hook.evaluation_total", { "relay.tool.name": "echo" })).toBe(2);
+  });
+});
+
+// ─── ask / notify dispatch paths ─────────────────────────────────────────────
+// These tests cover: ask/notify block handling in dispatchTurn, dispatchBoundarySends,
+// the boundary dispatch section of the loop, and dispatch_failed in outcomeFromTurnLoopError.
+// No real DB needed — fake SQL supplies envelope writes (no return needed) and
+// controls whether the work_queue enqueue succeeds or reports over-capacity.
+
+import { ChainId as ChainIdParser, Depth as DepthParser } from "../../../src/ids.ts";
+import type { ChainId, Depth } from "../../../src/ids.ts";
+
+function makeChainAndDepth(): { chainId: ChainId; depth: Depth } {
+  const c = ChainIdParser.parse(randomUUID());
+  const d = DepthParser.parse(0);
+  assert(c.ok && d.ok, "makeChainAndDepth: invalid ids");
+  return { chainId: c.value, depth: d.value };
+}
+
+function makeDispatchFakeSql(tenantId: TenantId, opts: { queueSucceeds: boolean }): Sql {
+  const fake = (strings: TemplateStringsArray): Promise<unknown[]> => {
+    const first = strings[0] ?? "";
+    if (first.includes("SELECT tenant_id FROM agents")) {
+      return Promise.resolve([{ tenant_id: tenantId }]);
+    }
+    if (first.includes("INSERT INTO hook_audit")) {
+      return Promise.resolve([
+        {
+          id: randomUUID(),
+          hook_id: "test/stub",
+          layer: "system",
+          event: "pre_message_send",
+          matcher_result: true,
+          decision: "approve",
+          reason: null,
+          latency_ms: 0,
+          tenant_id: tenantId,
+          session_id: null,
+          agent_id: randomUUID(),
+          turn_id: null,
+          tool_name: null,
+          created_at: new Date(),
+        },
+      ]);
+    }
+    // work_queue enqueue: return a row for success, empty for over-capacity.
+    if (first.includes("WITH candidate AS")) {
+      return opts.queueSucceeds ? Promise.resolve([{ id: randomUUID() }]) : Promise.resolve([]);
+    }
+    return Promise.resolve([]);
+  };
+  Object.assign(fake, {
+    json: (v: unknown) => v,
+    begin: (fn: (tx: unknown) => Promise<unknown>) => fn(fake),
+    unsafe: () => Promise.resolve([]),
+  });
+  return fake as unknown as Sql;
+}
+
+function askToolUseResponse(toolUseId: string, targetAgentId: string): ModelResponse {
+  const idResult = ToolUseId.parse(toolUseId);
+  assert(idResult.ok, "askToolUseResponse: invalid toolUseId");
+  return {
+    content: [
+      {
+        type: "tool_use",
+        id: idResult.value,
+        name: "ask",
+        input: { target_agent_id: targetAgentId, content: "can you help?" },
+      },
+    ],
+    stopReason: "tool_use",
+    usage: { inputTokens: 10, outputTokens: 5 },
+  };
+}
+
+describe("runTurnLoop — ask/notify dispatch", () => {
+  let clock: FakeClock;
+  let ids: ReturnType<typeof makeIds>;
+  let chainDepth: ReturnType<typeof makeChainAndDepth>;
+
+  beforeEach(() => {
+    clock = new FakeClock(1_000_000);
+    ids = makeIds();
+    chainDepth = makeChainAndDepth();
+    __clearRegistryForTesting();
+  });
+
+  afterEach(() => {
+    __clearRegistryForTesting();
+  });
+
+  test("ask tool_use: enqueue over-capacity → dispatch_failed error", async () => {
+    const targetAgentId = randomUUID();
+    const model: ModelClient = {
+      complete: () => Promise.resolve(askToolUseResponse("toolu_ask_01", targetAgentId)),
+    };
+    const tools = new InMemoryToolRegistry([]);
+    const sql = makeDispatchFakeSql(ids.tenantId, { queueSucceeds: false });
+
+    const result = await runTurnLoop(
+      { sql, clock, model, tools, maxTurns: 10 },
+      {
+        ...ids,
+        ...chainDepth,
+        systemPrompt: "sys",
+        initialMessages: baseInput,
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("dispatch_failed");
+  });
+
+  test("ask tool_use: enqueue succeeds → suspended with one pending ask", async () => {
+    const targetAgentId = randomUUID();
+    const model: ModelClient = {
+      complete: () => Promise.resolve(askToolUseResponse("toolu_ask_01", targetAgentId)),
+    };
+    const tools = new InMemoryToolRegistry([]);
+    const sql = makeDispatchFakeSql(ids.tenantId, { queueSucceeds: true });
+
+    const result = await runTurnLoop(
+      { sql, clock, model, tools, maxTurns: 10 },
+      {
+        ...ids,
+        ...chainDepth,
+        systemPrompt: "sys",
+        initialMessages: baseInput,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.kind).toBe("suspended");
+    if (result.value.kind !== "suspended") return;
+    expect(result.value.pendingAsks).toHaveLength(1);
+    expect(result.value.pendingAsks[0]?.toolUseId as string).toBe("toolu_ask_01");
+    expect(result.value.pendingAsks[0]?.targetAgentId as string).toBe(targetAgentId);
+    expect(result.value.turns).toHaveLength(1);
+  });
+
+  test("ask tool_use with invalid input → inline error tool_result, no suspend", async () => {
+    const badIdResult = ToolUseId.parse("toolu_bad_01");
+    assert(badIdResult.ok, "test: invalid toolUseId");
+    const model: ModelClient = {
+      // target_agent_id is missing — parseAskInput returns validation_failed
+      complete: () =>
+        Promise.resolve({
+          content: [
+            {
+              type: "tool_use" as const,
+              id: badIdResult.value,
+              name: "ask",
+              input: { content: "oops" }, // missing target_agent_id
+            },
+          ],
+          stopReason: "tool_use" as const,
+          usage: { inputTokens: 10, outputTokens: 5 },
+        }),
+    };
+    // After inline error, model should get the error tool_result and return end_turn
+    let callCount = 0;
+    const mockModel: ModelClient = {
+      complete: () => {
+        callCount++;
+        if (callCount === 1)
+          return model.complete({
+            systemPrompt: "",
+            messages: [],
+            tools: [],
+            signal: new AbortController().signal,
+          });
+        return Promise.resolve(textResponse("ok after error"));
+      },
+    };
+    const tools = new InMemoryToolRegistry([]);
+    const sql = makeFakeSql(ids.tenantId);
+
+    const result = await runTurnLoop(
+      { sql, clock, model: mockModel, tools, maxTurns: 10 },
+      { ...ids, systemPrompt: "sys", initialMessages: baseInput },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.kind).toBe("completed");
+    if (result.value.kind !== "completed") return;
+    // First turn: ask tool_use with error tool_result (no suspend)
+    const firstTurn = result.value.turns[0];
+    expect(firstTurn?.toolResults).toHaveLength(1);
+    expect(firstTurn?.toolResults[0]?.isError).toBe(true);
   });
 });

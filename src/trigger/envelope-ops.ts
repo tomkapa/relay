@@ -37,23 +37,34 @@ type EnvelopeRow = {
   readonly created_at: Date;
 };
 
+// Writes an envelope row. If `explicitId` is provided (for idempotent retries), the INSERT
+// uses ON CONFLICT (id) DO NOTHING so duplicate envelopes from retried turns are harmless.
 export async function writeEnvelope(
   sql: Sql,
   tenantId: TenantIdBrand,
   kind: "message" | "event",
   payload: unknown,
+  opts?: { readonly explicitId?: EnvelopeIdBrand },
 ): Promise<Result<EnvelopeIdBrand, EnvelopeError>> {
   const payloadBytes = JSON.stringify(payload).length;
   if (payloadBytes > MAX_ENVELOPE_BYTES) {
     return err({ kind: "envelope_too_large", bytes: payloadBytes, max: MAX_ENVELOPE_BYTES });
   }
 
-  const id = mintId(EnvelopeId.parse, "writeEnvelope");
+  const id = opts?.explicitId ?? mintId(EnvelopeId.parse, "writeEnvelope");
 
-  await sql`
-    INSERT INTO trigger_envelopes (id, tenant_id, kind, payload)
-    VALUES (${id}, ${tenantId}, ${kind}, ${sql.json(payload as DbJson)})
-  `;
+  if (opts?.explicitId !== undefined) {
+    await sql`
+      INSERT INTO trigger_envelopes (id, tenant_id, kind, payload)
+      VALUES (${id}, ${tenantId}, ${kind}, ${sql.json(payload as DbJson)})
+      ON CONFLICT (id) DO NOTHING
+    `;
+  } else {
+    await sql`
+      INSERT INTO trigger_envelopes (id, tenant_id, kind, payload)
+      VALUES (${id}, ${tenantId}, ${kind}, ${sql.json(payload as DbJson)})
+    `;
+  }
 
   return ok(id);
 }

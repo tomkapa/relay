@@ -6,8 +6,21 @@ import type { Sql } from "postgres";
 import { assert } from "../core/assert.ts";
 import type { Clock } from "../core/clock.ts";
 import { err, ok, type Result } from "../core/result.ts";
-import type { AgentId, PendingSystemMessageId, SessionId, TenantId } from "../ids.ts";
-import { TurnId, mintId } from "../ids.ts";
+import { idempotencyKey, idempotencyKeyToUuid } from "../core/idempotency.ts";
+import {
+  AgentId,
+  Depth,
+  EnvelopeId,
+  TurnId,
+  mintId,
+  type AgentId as AgentIdBrand,
+  type ChainId as ChainIdBrand,
+  type Depth as DepthBrand,
+  type PendingSystemMessageId,
+  type SessionId,
+  type TenantId,
+  type ToolUseId,
+} from "../ids.ts";
 import {
   Attr,
   GenAiAttr,
@@ -35,12 +48,59 @@ import type {
   Turn,
   TurnLoopError,
 } from "./turn.ts";
-import type { PostToolUsePayload, PreToolUsePayload } from "../hook/payloads.ts";
+import type {
+  PostToolUsePayload,
+  PreMessageSendPayload,
+  PreToolUsePayload,
+} from "../hook/payloads.ts";
 import { HOOK_EVENT } from "../hook/types.ts";
 import { runHooks } from "../hook/run.ts";
 import { snapshotHookConfig, type HookConfigSnapshot } from "../hook/snapshot.ts";
 import { drainPendingSystemMessages } from "../hook/pending.ts";
 import { MAX_PENDING_MESSAGES_PER_TURN } from "../hook/limits.ts";
+import {
+  ASK_TOOL_NAME,
+  NOTIFY_TOOL_NAME,
+  parseAskInput,
+  parseNotifyInput,
+  builtinInlineError,
+  askToolSchema,
+  notifyToolSchema,
+} from "./builtin-tools.ts";
+import { writeEnvelope } from "../trigger/envelope-ops.ts";
+import { enqueue } from "../work_queue/queue-ops.ts";
+import type { TriggerPayload } from "../trigger/payload.ts";
+
+export type PendingAsk = {
+  readonly toolUseId: ToolUseId;
+  readonly targetAgentId: AgentIdBrand;
+  readonly content: string;
+};
+
+export type NotifyDispatch = {
+  readonly toolUseId: ToolUseId;
+  readonly targetAgentId: AgentIdBrand;
+  readonly content: string;
+};
+
+export type TurnDispatchOutcome = {
+  readonly toolResults: readonly ToolResultBlock[];
+  readonly pendingAsks: readonly PendingAsk[];
+  readonly notifies: readonly NotifyDispatch[];
+};
+
+// Tagged union return from runTurnLoop. Callers branch on `kind`.
+export type LoopOutcome =
+  | {
+      readonly kind: "completed";
+      readonly turns: readonly Turn[];
+      readonly finalResponse: ModelResponse;
+    }
+  | {
+      readonly kind: "suspended";
+      readonly turns: readonly Turn[];
+      readonly pendingAsks: readonly PendingAsk[];
+    };
 
 type LoopDeps = {
   readonly sql: Sql;
@@ -54,8 +114,11 @@ type LoopDeps = {
 
 type LoopInput = {
   readonly sessionId: SessionId;
-  readonly agentId: AgentId;
+  readonly agentId: AgentIdBrand;
   readonly tenantId: TenantId;
+  // Required when the session may call ask() — asserted in dispatchBoundarySends.
+  readonly chainId?: ChainIdBrand;
+  readonly depth?: DepthBrand;
   readonly systemPrompt: string;
   readonly initialMessages: readonly Message[];
   readonly startTurnIndex?: number; // first turn_index to write; defaults to 0 for fresh sessions
@@ -64,7 +127,7 @@ type LoopInput = {
 type OneTurnInput = {
   readonly index: number;
   readonly sessionId: SessionId;
-  readonly agentId: AgentId;
+  readonly agentId: AgentIdBrand;
   readonly tenantId: TenantId;
   readonly systemPrompt: string;
   readonly messages: readonly Message[];
@@ -73,7 +136,7 @@ type OneTurnInput = {
   readonly toolTimeoutMs: number;
 };
 
-type TurnCtx = { sessionId: SessionId; agentId: AgentId; tenantId: TenantId; turnId: TurnId };
+type TurnCtx = { sessionId: SessionId; agentId: AgentIdBrand; tenantId: TenantId; turnId: TurnId };
 
 function isAbortTimeout(e: unknown): boolean {
   return e instanceof DOMException && e.name === "TimeoutError";
@@ -276,7 +339,10 @@ async function dispatchOneBlock(
   });
 }
 
-async function dispatchTools(
+// Classify each tool_use block into regular, ask, or notify. Run PreMessageSend hook on
+// ask/notify entries; deny → inline error (no suspend); modify → content rewritten.
+// Returns a TurnDispatchOutcome with all three bucket lists populated.
+async function dispatchTurn(
   tools: ToolRegistry,
   content: readonly ContentBlock[],
   toolSchemas: readonly ToolSchema[],
@@ -285,7 +351,7 @@ async function dispatchTools(
   sql: Sql,
   clock: Clock,
   hookConfig: HookConfigSnapshot,
-): Promise<Result<readonly ToolResultBlock[], TurnLoopError>> {
+): Promise<Result<TurnDispatchOutcome, TurnLoopError>> {
   const toolIterations = counter(
     "relay.tool.dispatch_iteration_total",
     "tool_use blocks dispatched within a turn.",
@@ -294,9 +360,15 @@ async function dispatchTools(
     "relay.tool.dispatch_completion_total",
     "Per tool_use outcome. relay.outcome ∈ {invoked, tool_unknown, timeout}.",
   );
+  const sendDispatch = counter(
+    "relay.send.dispatch_total",
+    "Boundary sends dispatched. Attrs: relay.send.kind, relay.outcome.",
+  );
 
   const available = new Set(toolSchemas.map((s) => s.name));
-  const results: ToolResultBlock[] = [];
+  const toolResults: ToolResultBlock[] = [];
+  const pendingAsks: PendingAsk[] = [];
+  const notifies: NotifyDispatch[] = [];
 
   for (const block of content) {
     if (block.type !== "tool_use") continue;
@@ -309,6 +381,87 @@ async function dispatchTools(
       [Attr.ToolName]: block.name,
     };
     toolIterations.add(1, toolAttrs);
+
+    if (block.name === ASK_TOOL_NAME || block.name === NOTIFY_TOOL_NAME) {
+      const kind = block.name === ASK_TOOL_NAME ? "ask" : "notify";
+      const parseResult =
+        kind === "ask" ? parseAskInput(block.input) : parseNotifyInput(block.input);
+
+      if (!parseResult.ok) {
+        sendDispatch.add(1, { [Attr.SendKind]: kind, [Attr.Outcome]: "validation_failed" });
+        toolResults.push(builtinInlineError(block.id, parseResult.error.reason));
+        continue;
+      }
+
+      const parsed = parseResult.value;
+
+      // Run PreMessageSend hook for this send.
+      const iKey = idempotencyKey({
+        writer: kind,
+        sessionId: ctx.sessionId,
+        turnId: ctx.turnId,
+        toolCallId: block.id,
+      });
+
+      const sendPayload: PreMessageSendPayload = {
+        tenantId: ctx.tenantId,
+        senderAgentId: ctx.agentId,
+        senderSessionId: ctx.sessionId,
+        turnId: ctx.turnId,
+        target: { type: "agent", agentId: parsed.targetAgentId },
+        kind,
+        content: parsed.content,
+        idempotencyKey: iKey,
+      };
+
+      const hookResult = await runHooks(
+        sql,
+        clock,
+        hookConfig,
+        {
+          tenantId: ctx.tenantId,
+          agentId: ctx.agentId,
+          sessionId: ctx.sessionId,
+          turnId: ctx.turnId,
+          toolName: block.name,
+          event: HOOK_EVENT.PreMessageSend,
+        },
+        sendPayload,
+      );
+
+      if (hookResult.decision === "deny") {
+        sendDispatch.add(1, { [Attr.SendKind]: kind, [Attr.Outcome]: "hook_denied" });
+        toolResults.push(builtinInlineError(block.id, hookResult.reason));
+        continue;
+      }
+
+      // Apply modify (content rewrite only in MVP).
+      const finalContent =
+        hookResult.decision === "modify" ? hookResult.payload.content : parsed.content;
+
+      if (kind === "ask") {
+        pendingAsks.push({
+          toolUseId: block.id,
+          targetAgentId: parsed.targetAgentId,
+          content: finalContent,
+        });
+        sendDispatch.add(1, { [Attr.SendKind]: "ask", [Attr.Outcome]: "dispatched" });
+      } else {
+        notifies.push({
+          toolUseId: block.id,
+          targetAgentId: parsed.targetAgentId,
+          content: finalContent,
+        });
+        // Synthetic tool_result so the assistant message's tool_use is paired immediately.
+        toolResults.push({
+          type: "tool_result",
+          toolUseId: block.id,
+          content: "<dispatched>",
+        });
+        sendDispatch.add(1, { [Attr.SendKind]: "notify", [Attr.Outcome]: "dispatched" });
+      }
+      continue;
+    }
 
     if (!available.has(block.name)) {
       toolCompletions.add(1, { ...toolAttrs, [Attr.Outcome]: "tool_unknown" });
@@ -327,16 +480,101 @@ async function dispatchTools(
       hookConfig,
     );
     if (!r.ok) return r;
-    results.push(r.value);
+    toolResults.push(r.value);
   }
 
-  return ok(results);
+  return ok({ toolResults, pendingAsks, notifies });
 }
+
+// Emit envelope + session_start work item for each pending ask or notify.
+// Uses deterministic envelope ids so retried turns do not create duplicate child sessions.
+async function dispatchBoundarySends(
+  sql: Sql,
+  clock: Clock,
+  ctx: TurnCtx,
+  chainId: ChainIdBrand,
+  depth: DepthBrand,
+  asks: readonly PendingAsk[],
+  notifies: readonly NotifyDispatch[],
+): Promise<Result<void, TurnLoopError>> {
+  const now = new Date(clock.now());
+
+  type AnyDispatch = (PendingAsk & { isAsk: true }) | (NotifyDispatch & { isAsk: false });
+  const all: AnyDispatch[] = [
+    ...asks.map((a) => ({ ...a, isAsk: true as const })),
+    ...notifies.map((n) => ({ ...n, isAsk: false as const })),
+  ];
+
+  assert(
+    (depth as number) >= 0,
+    "dispatchBoundarySends: depth must be provided when asks are present",
+  );
+  if (!Depth.parse((depth as number) + 1).ok) {
+    return err({ kind: "dispatch_failed", detail: "depth cap exceeded on child session" });
+  }
+
+  for (const dispatch of all) {
+    const iKey = idempotencyKey({
+      writer: dispatch.isAsk ? "ask" : "notify",
+      sessionId: ctx.sessionId,
+      turnId: ctx.turnId,
+      toolCallId: dispatch.toolUseId,
+    });
+    const explicitIdStr = idempotencyKeyToUuid(iKey);
+    const explicitIdResult = EnvelopeId.parse(explicitIdStr);
+    assert(
+      explicitIdResult.ok,
+      "dispatchBoundarySends: idempotencyKeyToUuid produced invalid UUID",
+    );
+
+    const sender = AgentId.parse(ctx.agentId);
+    assert(sender.ok, "dispatchBoundarySends: ctx.agentId is invalid");
+
+    const payload: TriggerPayload = {
+      kind: "message",
+      sender: { type: "agent", id: ctx.agentId },
+      targetAgentId: dispatch.targetAgentId,
+      content: dispatch.content,
+      receivedAt: now,
+      parentSessionId: ctx.sessionId,
+      parentChainId: chainId,
+      parentDepth: depth,
+      ...(dispatch.isAsk ? { parentToolUseId: dispatch.toolUseId } : {}),
+    };
+
+    const envelopeResult = await writeEnvelope(sql, ctx.tenantId, "message", payload, {
+      explicitId: explicitIdResult.value,
+    });
+    if (!envelopeResult.ok) {
+      return err({
+        kind: "dispatch_failed",
+        detail: `writeEnvelope failed: ${envelopeResult.error.kind}`,
+      });
+    }
+
+    const workResult = await enqueue(sql, {
+      tenantId: ctx.tenantId,
+      kind: "session_start",
+      payloadRef: envelopeResult.value,
+      scheduledAt: now,
+    });
+    if (!workResult.ok) {
+      return err({
+        kind: "dispatch_failed",
+        detail: `enqueue failed: ${workResult.error.kind}`,
+      });
+    }
+  }
+
+  return ok(undefined);
+}
+
+type OneTurnResult = { readonly turn: Turn; readonly dispatchOutcome: TurnDispatchOutcome };
 
 async function runOneTurn(
   deps: { model: ModelClient; tools: ToolRegistry; clock: Clock; sql: Sql },
   input: OneTurnInput,
-): Promise<Result<Turn, TurnLoopError>> {
+): Promise<Result<OneTurnResult, TurnLoopError>> {
   const turnId = mintId(TurnId.parse, "runOneTurn");
   const ctx: TurnCtx = {
     sessionId: input.sessionId,
@@ -371,7 +609,7 @@ async function runOneTurn(
 
       const response = modelResult.value;
 
-      const toolsResult = await dispatchTools(
+      const dispatchResult = await dispatchTurn(
         deps.tools,
         response.content,
         input.toolSchemas,
@@ -381,18 +619,19 @@ async function runOneTurn(
         deps.clock,
         hookConfig,
       );
-      if (!toolsResult.ok) return toolsResult;
+      if (!dispatchResult.ok) return dispatchResult;
 
       const completedAt = new Date(deps.clock.now());
-
-      return ok({
+      const turn: Turn = {
         id: turnId,
         index: input.index,
         startedAt,
         completedAt,
         response,
-        toolResults: toolsResult.value,
-      });
+        // toolResults: regular + notify-synthetic + inline-error; NOT ask slots (filled on resume).
+        toolResults: dispatchResult.value.toolResults,
+      };
+      return ok({ turn, dispatchOutcome: dispatchResult.value });
     },
   );
 }
@@ -400,7 +639,7 @@ async function runOneTurn(
 export async function runTurnLoop(
   deps: LoopDeps,
   input: LoopInput,
-): Promise<Result<{ turns: readonly Turn[]; finalResponse: ModelResponse }, TurnLoopError>> {
+): Promise<Result<LoopOutcome, TurnLoopError>> {
   assert(input.systemPrompt.length > 0, "runTurnLoop: systemPrompt must be non-empty");
   assert(input.initialMessages.length > 0, "runTurnLoop: initialMessages must be non-empty");
 
@@ -418,7 +657,7 @@ export async function runTurnLoop(
   const toolTimeoutMs = deps.toolTimeoutMs ?? TOOL_CALL_TIMEOUT_MS;
   const messages: Message[] = [...input.initialMessages];
   const turns: Turn[] = [];
-  const toolSchemas = deps.tools.list();
+  const toolSchemas = [...deps.tools.list(), askToolSchema, notifyToolSchema];
 
   const turnIterations = counter(
     "relay.turn_loop.iteration_total",
@@ -426,7 +665,7 @@ export async function runTurnLoop(
   );
   const turnCompletions = counter(
     "relay.turn_loop.completion_total",
-    "Turn-loop exits. Attribute relay.outcome ∈ {end_turn, cap_exceeded, model_error, tool_error, persist_error}.",
+    "Turn-loop exits. Attribute relay.outcome ∈ {end_turn, cap_exceeded, model_error, tool_error, persist_error, suspended}.",
   );
   const baseAttrs = {
     [Attr.SessionId]: input.sessionId,
@@ -491,7 +730,7 @@ export async function runTurnLoop(
       return turnResult;
     }
 
-    const turn = turnResult.value;
+    const { turn, dispatchOutcome } = turnResult.value;
     turns.push(turn);
 
     const saved = await insertTurn(deps.sql, {
@@ -506,6 +745,50 @@ export async function runTurnLoop(
       return saved;
     }
 
+    // Boundary dispatch: persist first (two-phase, RELAY-73), then send.
+    // If any asks survived, dispatch all sends (ask + notify) in one boundary span.
+    if (dispatchOutcome.pendingAsks.length > 0 || dispatchOutcome.notifies.length > 0) {
+      const dispatchErr = await withSpan(
+        SpanName.BoundaryDispatch,
+        {
+          [Attr.SessionId]: input.sessionId,
+          [Attr.TurnId]: turn.id,
+          [Attr.SendCount]: dispatchOutcome.pendingAsks.length + dispatchOutcome.notifies.length,
+        },
+        async () => {
+          const ctx: TurnCtx = {
+            sessionId: input.sessionId,
+            agentId: input.agentId,
+            tenantId: input.tenantId,
+            turnId: turn.id,
+          };
+          assert(
+            input.chainId !== undefined && input.depth !== undefined,
+            "runTurnLoop: chainId and depth required when boundary dispatch occurs",
+          );
+          return dispatchBoundarySends(
+            deps.sql,
+            deps.clock,
+            ctx,
+            input.chainId,
+            input.depth,
+            dispatchOutcome.pendingAsks,
+            dispatchOutcome.notifies,
+          );
+        },
+      );
+      if (!dispatchErr.ok) {
+        turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "dispatch_error" });
+        return dispatchErr;
+      }
+    }
+
+    // Suspend if any asks are pending — skip pushing tool_results into messages.
+    if (dispatchOutcome.pendingAsks.length > 0) {
+      turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "suspended" });
+      return ok({ kind: "suspended", turns, pendingAsks: dispatchOutcome.pendingAsks });
+    }
+
     messages.push({ role: "assistant", content: turn.response.content });
     if (turn.toolResults.length > 0) {
       messages.push({ role: "user", content: turn.toolResults });
@@ -514,7 +797,7 @@ export async function runTurnLoop(
     switch (turn.response.stopReason) {
       case "end_turn":
         turnCompletions.add(1, { ...baseAttrs, [Attr.Outcome]: "end_turn" });
-        return ok({ turns, finalResponse: turn.response });
+        return ok({ kind: "completed", turns, finalResponse: turn.response });
       case "tool_use":
       case "max_tokens":
       case "stop_sequence":
@@ -544,5 +827,7 @@ function outcomeFromTurnLoopError(e: TurnLoopError): string {
       return "cap_exceeded";
     case "persist_turn_failed":
       return "persist_error";
+    case "dispatch_failed":
+      return "dispatch_error";
   }
 }

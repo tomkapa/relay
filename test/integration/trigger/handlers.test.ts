@@ -567,6 +567,7 @@ describeOrSkip("inbound_message handler — happy path", () => {
         content: "Hello from the test",
         receivedAt: new Date(clock.now()),
         sourceWorkItemId: widResult.value,
+        sourceToolUseId: null,
       });
       assert(inboundResult.ok, "fixture: writeInboundMessage failed");
 
@@ -607,6 +608,7 @@ describeOrSkip("inbound_message handler — happy path", () => {
           content: `${senderType} says hi`,
           receivedAt: new Date(clock.now()),
           sourceWorkItemId: widResult.value,
+          sourceToolUseId: null,
         });
         assert(inboundResult.ok, "fixture: writeInboundMessage failed");
         const workItem: WorkItem = {
@@ -648,6 +650,7 @@ describeOrSkip("inbound_message handler — idempotency", () => {
         content: "Hello",
         receivedAt: new Date(clock.now()),
         sourceWorkItemId: widResult.value,
+        sourceToolUseId: null,
       };
 
       const r1 = await writeInboundMessage(sql, spec);
@@ -742,6 +745,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         content: "Mismatch",
         receivedAt: new Date(clock.now()),
         sourceWorkItemId: widResult.value,
+        sourceToolUseId: null,
       });
       assert(inboundResult.ok, "fixture: writeInboundMessage failed");
 
@@ -786,6 +790,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         content: "Too late",
         receivedAt: new Date(clock.now()),
         sourceWorkItemId: widResult.value,
+        sourceToolUseId: null,
       });
       assert(inboundResult.ok, "fixture: writeInboundMessage failed");
 
@@ -827,6 +832,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         content: "Ghost session",
         receivedAt: new Date(clock.now()),
         sourceWorkItemId: widResult.value,
+        sourceToolUseId: null,
       });
       assert(inboundResult.ok, "fixture: writeInboundMessage failed");
 
@@ -880,6 +886,7 @@ describeOrSkip("inbound_message handler — error cases", () => {
         content: "Cross-tenant target",
         receivedAt: new Date(clock.now()),
         sourceWorkItemId: widResult.value,
+        sourceToolUseId: null,
       });
       assert(inboundResult.ok, "fixture: writeInboundMessage failed");
 
@@ -928,6 +935,7 @@ describeOrSkip("inbound_message handler — resume turn loop wiring", () => {
         content: "Follow-up question",
         receivedAt: new Date(clock.now()),
         sourceWorkItemId: widResult.value,
+        sourceToolUseId: null,
       });
       assert(inboundResult.ok, "fixture: writeInboundMessage failed");
 
@@ -1006,6 +1014,7 @@ describeOrSkip("inbound_message handler — resume turn loop wiring", () => {
         content: "Trigger failure",
         receivedAt: new Date(clock.now()),
         sourceWorkItemId: widResult.value,
+        sourceToolUseId: null,
       });
       assert(inboundResult.ok, "fixture: writeInboundMessage failed");
 
