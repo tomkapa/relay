@@ -121,6 +121,7 @@ async function insertTurnRow(
   tenantId: ReturnType<typeof tenant>,
   turnIndex: number,
   responseText: string,
+  completedAt?: Date,
 ): Promise<void> {
   const turnId = randomUUID();
   const response = sql.json({
@@ -130,10 +131,11 @@ async function insertTurnRow(
   });
   const toolResults = sql.json([]);
   const usage = sql.json({ inputTokens: 5, outputTokens: 3 });
-  const now = new Date();
+  // Default to epoch so the turn is reliably "in the past" relative to any fake-clock inbound.
+  const ts = completedAt ?? new Date(0);
   await sql`
     INSERT INTO turns (id, session_id, tenant_id, agent_id, turn_index, started_at, completed_at, response, tool_results, usage)
-    VALUES (${turnId}, ${sessionId}, ${tenantId}, ${agentId}, ${turnIndex}, ${now}, ${now}, ${response}, ${toolResults}, ${usage})
+    VALUES (${turnId}, ${sessionId}, ${tenantId}, ${agentId}, ${turnIndex}, ${ts}, ${ts}, ${response}, ${toolResults}, ${usage})
   `;
 }
 
