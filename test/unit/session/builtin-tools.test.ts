@@ -66,6 +66,27 @@ describe("parseNotifyInput", () => {
     if (r.ok) return;
     expect(r.error.kind).toBe("validation_failed");
   });
+
+  test("malformed UUID for target_agent_id returns validation_failed", () => {
+    const r = parseNotifyInput({ target_agent_id: "not-a-uuid", content: "hello" });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("validation_failed");
+  });
+
+  test("empty content returns validation_failed", () => {
+    const r = parseNotifyInput({ target_agent_id: VALID_UUID, content: "" });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("validation_failed");
+  });
+
+  test("missing content returns validation_failed", () => {
+    const r = parseNotifyInput({ target_agent_id: VALID_UUID });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.kind).toBe("validation_failed");
+  });
 });
 
 describe("askToolSchema", () => {
