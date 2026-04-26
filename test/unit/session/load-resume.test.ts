@@ -1,18 +1,29 @@
 // Unit tests for loadResumeInput. Pure-function tests using a hand-rolled fake Sql.
 // Integration-level correctness (real DB, real turns from runTurnLoop) is in
 // test/integration/trigger/handlers.test.ts under "inbound_message — resume turn loop wiring".
+// Multi-cycle integration tests are in test/integration/session/load-resume.multi-cycle.test.ts.
 
 import { describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { InboundMessageId, SessionId, TenantId } from "../../../src/ids.ts";
 import { AssertionError } from "../../../src/core/assert.ts";
 import { loadResumeInput } from "../../../src/session/load-resume.ts";
+import { MAX_INBOUNDS_REPLAYED_PER_RESUME } from "../../../src/session/limits.ts";
 
 const SESS_ID = "11111111-1111-4111-a111-111111111111" as SessionId;
 const TENANT_ID = "22222222-2222-4222-a222-222222222222" as TenantId;
 const OTHER_TENANT = "33333333-3333-4333-a333-333333333333" as TenantId;
 const INBOUND_ID = "44444444-4444-4444-a444-444444444444" as InboundMessageId;
 const SYS_PROMPT = "You are a helpful assistant.";
+
+// Stable epoch timestamps used across fixtures — ms values encode the intent clearly.
+const T0 = new Date(0); // session.created_at
+const T1 = new Date(1_000); // turn[0].started_at
+const T2 = new Date(2_000); // turn[0].completed_at
+const T3 = new Date(3_000); // turn[1].started_at
+const T4 = new Date(4_000); // turn[1].completed_at
+const T7 = new Date(7_000); // inbound after last turn
 
 type SqlCallSpec = {
   rows: unknown[];
@@ -38,12 +49,21 @@ function makeSql(
 }
 
 function sessRow(tenantId: string = TENANT_ID, openingContent = "Hello") {
-  return { tenant_id: tenantId, opening_user_content: openingContent };
+  return { tenant_id: tenantId, opening_user_content: openingContent, created_at: T0 };
 }
 
-function turnRow(turnIndex: number, responseText: string, toolResults: unknown[] = []): unknown {
+// Turn row with timestamps. Default timestamps assume a single-turn session.
+function turnRow(
+  turnIndex: number,
+  responseText: string,
+  toolResults: unknown[] = [],
+  startedAt: Date = T1,
+  completedAt: Date = T2,
+): unknown {
   return {
     turn_index: turnIndex,
+    started_at: startedAt,
+    completed_at: completedAt,
     response: {
       content: [{ type: "text", text: responseText }],
       stopReason: "end_turn",
@@ -53,9 +73,52 @@ function turnRow(turnIndex: number, responseText: string, toolResults: unknown[]
   };
 }
 
+// Turn row ending with one tool_use block and its result already stored (regular tool, resolved inline).
+function resolvedToolTurnRow(toolUseId: string, toolResultContent: string): unknown {
+  return {
+    turn_index: 0,
+    started_at: T1,
+    completed_at: T2,
+    response: {
+      content: [{ type: "tool_use", id: toolUseId, name: "echo", input: {} }],
+      stopReason: "tool_use",
+      usage: { inputTokens: 5, outputTokens: 3 },
+    },
+    tool_results: [{ type: "tool_result", toolUseId, content: toolResultContent }],
+  };
+}
+
+// Turn row ending with an ask tool_use (unanswered — suspended).
+function askTurnRow(toolUseId: string, turnIndex = 0, startedAt = T1, completedAt = T2): unknown {
+  return {
+    turn_index: turnIndex,
+    started_at: startedAt,
+    completed_at: completedAt,
+    response: {
+      content: [{ type: "tool_use", id: toolUseId, name: "ask", input: {} }],
+      stopReason: "tool_use",
+      usage: { inputTokens: 5, outputTokens: 3 },
+    },
+    tool_results: [],
+  };
+}
+
+function inboundRow(
+  content: string,
+  receivedAt: Date = T7,
+  sourceToolUseId: string | null = null,
+): unknown {
+  return {
+    id: randomUUID(),
+    received_at: receivedAt,
+    content,
+    source_tool_use_id: sourceToolUseId,
+  };
+}
+
 describe("loadResumeInput — no prior turns", () => {
   test("session with no turns: 2 messages — opening user + inbound", async () => {
-    const sql = makeSql({ rows: [sessRow()] }, { rows: [] });
+    const sql = makeSql({ rows: [sessRow()] }, { rows: [] }, { rows: [inboundRow("Reply")] });
     const result = await loadResumeInput(sql, {
       sessionId: SESS_ID,
       tenantId: TENANT_ID,
@@ -78,7 +141,7 @@ describe("loadResumeInput — no prior turns", () => {
   });
 
   test("systemPrompt in result comes from params", async () => {
-    const sql = makeSql({ rows: [sessRow()] }, { rows: [] });
+    const sql = makeSql({ rows: [sessRow()] }, { rows: [] }, { rows: [inboundRow("Hi")] });
     const result = await loadResumeInput(sql, {
       sessionId: SESS_ID,
       tenantId: TENANT_ID,
@@ -95,7 +158,11 @@ describe("loadResumeInput — no prior turns", () => {
 
 describe("loadResumeInput — with prior turns (no tool results)", () => {
   test("one assistant turn: 3 messages — opening, assistant, inbound", async () => {
-    const sql = makeSql({ rows: [sessRow()] }, { rows: [turnRow(0, "First reply")] });
+    const sql = makeSql(
+      { rows: [sessRow()] },
+      { rows: [turnRow(0, "First reply")] },
+      { rows: [inboundRow("Follow-up")] },
+    );
     const result = await loadResumeInput(sql, {
       sessionId: SESS_ID,
       tenantId: TENANT_ID,
@@ -119,7 +186,8 @@ describe("loadResumeInput — with prior turns (no tool results)", () => {
   test("two turns: 4 messages — opening, assistant, assistant, inbound", async () => {
     const sql = makeSql(
       { rows: [sessRow()] },
-      { rows: [turnRow(0, "Reply 0"), turnRow(1, "Reply 1")] },
+      { rows: [turnRow(0, "Reply 0"), turnRow(1, "Reply 1", [], T3, T4)] },
+      { rows: [inboundRow("Follow-up")] },
     );
     const result = await loadResumeInput(sql, {
       sessionId: SESS_ID,
@@ -137,16 +205,11 @@ describe("loadResumeInput — with prior turns (no tool results)", () => {
 });
 
 describe("loadResumeInput — with tool results", () => {
-  test("turn with tool_results: 4 messages — opening, assistant, user(tool_results), inbound", async () => {
-    const toolResult = {
-      type: "tool_result",
-      toolUseId: "toolu_01",
-      content: "42",
-      isError: false,
-    };
+  test("turn with resolved tool_result: 4 messages — opening, assistant, user(tool_results), inbound", async () => {
     const sql = makeSql(
       { rows: [sessRow()] },
-      { rows: [turnRow(0, "tool_use response", [toolResult])] },
+      { rows: [resolvedToolTurnRow("toolu_01", "42")] },
+      { rows: [inboundRow("Next question")] },
     );
     const result = await loadResumeInput(sql, {
       sessionId: SESS_ID,
@@ -166,6 +229,7 @@ describe("loadResumeInput — with tool results", () => {
     expect(msgs[3]?.role).toBe("user");
     const toolBlock = msgs[2]?.content[0];
     expect(toolBlock?.type).toBe("tool_result");
+    if (toolBlock?.type === "tool_result") expect(toolBlock.content).toBe("42");
   });
 });
 
@@ -201,7 +265,11 @@ describe("loadResumeInput — error cases", () => {
   });
 
   test("turns out of order: throws AssertionError", () => {
-    const sql = makeSql({ rows: [sessRow()] }, { rows: [turnRow(1, "Wrong index")] });
+    const sql = makeSql(
+      { rows: [sessRow()] },
+      { rows: [turnRow(1, "Wrong index")] },
+      { rows: [inboundRow("Hi")] },
+    );
     expect(
       loadResumeInput(sql, {
         sessionId: SESS_ID,
@@ -221,11 +289,14 @@ describe("loadResumeInput — error cases", () => {
         rows: [
           {
             turn_index: 0,
+            started_at: T1,
+            completed_at: T2,
             response: { invalid: "shape" },
             tool_results: [],
           },
         ],
       },
+      { rows: [inboundRow("Hi")] },
     );
     expect(
       loadResumeInput(sql, {
@@ -270,31 +341,16 @@ describe("loadResumeInput — precondition assertions", () => {
   });
 });
 
-describe("loadResumeInput — ask-resume path", () => {
+describe("loadResumeInput — ask-resume path (single-cycle, RELAY-144 compat)", () => {
   const ASK_TOOL_USE_ID = "toolu_ask_01";
 
-  function askTurnRow(toolUseId: string): unknown {
-    return {
-      turn_index: 0,
-      response: {
-        content: [{ type: "tool_use", id: toolUseId, name: "ask", input: {} }],
-        stopReason: "tool_use",
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
-      // Suspended turn has empty tool_results (ask slot not yet filled).
-      tool_results: [],
-    };
-  }
-
   test("single ask, single reply: tool_result with inbound content", async () => {
-    const inboundRow = { source_tool_use_id: ASK_TOOL_USE_ID, content: "approved" };
     const sql = makeSql(
       { rows: [sessRow()] },
       { rows: [askTurnRow(ASK_TOOL_USE_ID)] },
-      { rows: [inboundRow] },
+      { rows: [inboundRow("approved", T7, ASK_TOOL_USE_ID)] },
     );
 
-    // Import ToolUseId to cast
     const { ToolUseId } = await import("../../../src/ids.ts");
     const toolUseIdResult = ToolUseId.parse(ASK_TOOL_USE_ID);
     expect(toolUseIdResult.ok).toBe(true);
@@ -324,30 +380,33 @@ describe("loadResumeInput — ask-resume path", () => {
   });
 
   test("multi-ask partial reply: unanswered ask gets <no reply yet>, answered ask gets reply", async () => {
-    const ASK_TOOL_USE_ID_B = "toolu_ask_01";
-    const ASK_TOOL_USE_ID_C = "toolu_ask_02";
+    const ASK_B = "toolu_ask_01";
+    const ASK_C = "toolu_ask_02";
 
     const { ToolUseId } = await import("../../../src/ids.ts");
-    const toolUseIdResultB = ToolUseId.parse(ASK_TOOL_USE_ID_B);
+    const toolUseIdResultB = ToolUseId.parse(ASK_B);
     expect(toolUseIdResultB.ok).toBe(true);
     if (!toolUseIdResultB.ok) return;
 
-    // Turn has two ask tool_uses; B replied, C did not
     const twoAskTurnRow: unknown = {
       turn_index: 0,
+      started_at: T1,
+      completed_at: T2,
       response: {
         content: [
-          { type: "tool_use", id: ASK_TOOL_USE_ID_B, name: "ask", input: {} },
-          { type: "tool_use", id: ASK_TOOL_USE_ID_C, name: "ask", input: {} },
+          { type: "tool_use", id: ASK_B, name: "ask", input: {} },
+          { type: "tool_use", id: ASK_C, name: "ask", input: {} },
         ],
         stopReason: "tool_use",
         usage: { inputTokens: 5, outputTokens: 3 },
       },
       tool_results: [],
     };
-    // Only B's inbound row exists in DB
-    const inboundRow = { source_tool_use_id: ASK_TOOL_USE_ID_B, content: "B replied" };
-    const sql = makeSql({ rows: [sessRow()] }, { rows: [twoAskTurnRow] }, { rows: [inboundRow] });
+    const sql = makeSql(
+      { rows: [sessRow()] },
+      { rows: [twoAskTurnRow] },
+      { rows: [inboundRow("B replied", T7, ASK_B)] },
+    );
 
     const result = await loadResumeInput(sql, {
       sessionId: SESS_ID,
@@ -371,11 +430,11 @@ describe("loadResumeInput — ask-resume path", () => {
     expect(blockB?.type).toBe("tool_result");
     if (blockB?.type !== "tool_result") return;
     expect(blockB.content).toBe("B replied");
-    expect(blockB.toolUseId as string).toBe(ASK_TOOL_USE_ID_B);
+    expect(blockB.toolUseId as string).toBe(ASK_B);
     expect(blockC?.type).toBe("tool_result");
     if (blockC?.type !== "tool_result") return;
     expect(blockC.content).toBe("<no reply yet>");
-    expect(blockC.toolUseId as string).toBe(ASK_TOOL_USE_ID_C);
+    expect(blockC.toolUseId as string).toBe(ASK_C);
   });
 
   test("mixed regular tool + ask: stored tool_result used for regular, inbound used for ask", async () => {
@@ -388,6 +447,8 @@ describe("loadResumeInput — ask-resume path", () => {
 
     const mixedTurnRow: unknown = {
       turn_index: 0,
+      started_at: T1,
+      completed_at: T2,
       response: {
         content: [
           { type: "tool_use", id: REGULAR_ID, name: "echo", input: {} },
@@ -396,11 +457,13 @@ describe("loadResumeInput — ask-resume path", () => {
         stopReason: "tool_use",
         usage: { inputTokens: 5, outputTokens: 3 },
       },
-      // Regular tool is paired; ask tool is not.
       tool_results: [{ type: "tool_result", toolUseId: REGULAR_ID, content: "echo result" }],
     };
-    const inboundRow = { source_tool_use_id: ASK_ID, content: "ask reply" };
-    const sql = makeSql({ rows: [sessRow()] }, { rows: [mixedTurnRow] }, { rows: [inboundRow] });
+    const sql = makeSql(
+      { rows: [sessRow()] },
+      { rows: [mixedTurnRow] },
+      { rows: [inboundRow("ask reply", T7, ASK_ID)] },
+    );
 
     const result = await loadResumeInput(sql, {
       sessionId: SESS_ID,
@@ -426,32 +489,27 @@ describe("loadResumeInput — ask-resume path", () => {
     if (blockA?.type === "tool_result") expect(blockA.content).toBe("ask reply");
   });
 
-  test("ask not in inbound DB: tool_result has <no reply yet>, inboundContent appended", async () => {
-    const { ToolUseId } = await import("../../../src/ids.ts");
-    const askIdResult = ToolUseId.parse(ASK_TOOL_USE_ID);
-    expect(askIdResult.ok).toBe(true);
-    if (!askIdResult.ok) return;
-
-    // No inbound rows in DB (not written yet / race condition)
+  test("fresh inbound on ask-suspended session: ask gets <no reply yet>, fresh appended as plain text", async () => {
+    // Inbound with no source_tool_use_id (not a reply), session has an unanswered ask.
     const sql = makeSql(
       { rows: [sessRow()] },
       { rows: [askTurnRow(ASK_TOOL_USE_ID)] },
-      { rows: [] },
+      { rows: [inboundRow("fresh nudge", T7, null)] },
     );
 
     const result = await loadResumeInput(sql, {
       sessionId: SESS_ID,
       tenantId: TENANT_ID,
       agentSystemPrompt: SYS_PROMPT,
-      inboundContent: "direct message",
+      inboundContent: "fresh nudge",
       inboundMessageId: INBOUND_ID,
-      sourceToolUseId: askIdResult.value,
+      sourceToolUseId: null,
     });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const msgs = result.value.initialMessages;
-    // opening_user + assistant + user(ask tool_result "<no reply yet>") + user(plain text)
+    // opening_user + assistant(ask) + user(ask "<no reply yet>") + user(plain fresh nudge)
     expect(msgs).toHaveLength(4);
     const toolResultMsg = msgs[2];
     const block = toolResultMsg?.content[0];
@@ -459,34 +517,270 @@ describe("loadResumeInput — ask-resume path", () => {
     const plainMsg = msgs[3];
     expect(plainMsg?.role).toBe("user");
     const plainBlock = plainMsg?.content[0];
-    if (plainBlock?.type === "text") expect(plainBlock.text).toBe("direct message");
+    if (plainBlock?.type === "text") expect(plainBlock.text).toBe("fresh nudge");
   });
+});
 
-  test("sourceToolUseId null on session with ask turn: falls back to plain-text wrapping", async () => {
+describe("loadResumeInput — multi-cycle (RELAY-232)", () => {
+  test("3-turn session: paired asks in turns 0, 1, 2 produce correct transcript", async () => {
+    const U1 = "toolu_ask_u1";
+    const U2 = "toolu_notify_u2";
+    const U3 = "toolu_ask_u3";
+
+    // Turn 0: ask(u1), suspended
+    // Turn 1: notify(u2), tool_result stored inline
+    // Turn 2: ask(u3), suspended — this is the one being resumed now
+
+    const turn0: unknown = {
+      turn_index: 0,
+      started_at: new Date(10_000),
+      completed_at: new Date(11_000),
+      response: {
+        content: [{ type: "tool_use", id: U1, name: "ask", input: {} }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+      tool_results: [],
+    };
+    const turn1: unknown = {
+      turn_index: 1,
+      started_at: new Date(20_000),
+      completed_at: new Date(21_000),
+      response: {
+        content: [{ type: "tool_use", id: U2, name: "notify", input: {} }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+      // notify tool_result stored inline during turn execution
+      tool_results: [{ type: "tool_result", toolUseId: U2, content: "<dispatched>" }],
+    };
+    const turn2: unknown = {
+      turn_index: 2,
+      started_at: new Date(25_000),
+      completed_at: new Date(26_000),
+      response: {
+        content: [{ type: "tool_use", id: U3, name: "ask", input: {} }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+      tool_results: [],
+    };
+
+    const inboundR1 = inboundRow("reply to u1", new Date(15_000), U1); // after turn 0
+    const inboundR2 = inboundRow("reply to u3", new Date(30_000), U3); // after turn 2
+
     const sql = makeSql(
       { rows: [sessRow()] },
-      { rows: [askTurnRow(ASK_TOOL_USE_ID)] },
-      { rows: [] },
+      { rows: [turn0, turn1, turn2] },
+      { rows: [inboundR1, inboundR2] },
+    );
+
+    const { ToolUseId } = await import("../../../src/ids.ts");
+    const u3Result = ToolUseId.parse(U3);
+    expect(u3Result.ok).toBe(true);
+    if (!u3Result.ok) return;
+
+    const result = await loadResumeInput(sql, {
+      sessionId: SESS_ID,
+      tenantId: TENANT_ID,
+      agentSystemPrompt: SYS_PROMPT,
+      inboundContent: "reply to u3",
+      inboundMessageId: INBOUND_ID,
+      sourceToolUseId: u3Result.value,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const msgs = result.value.initialMessages;
+    // Expected order:
+    // [0] user: opening "Hello"
+    // [1] assistant: turn 0 (ask u1)
+    // [2] user: tool_result(u1, "reply to u1")
+    // [3] assistant: turn 1 (notify u2)
+    // [4] user: tool_result(u2, "<dispatched>")
+    // [5] assistant: turn 2 (ask u3)
+    // [6] user: tool_result(u3, "reply to u3")
+    expect(msgs).toHaveLength(7);
+
+    expect(msgs[0]?.role).toBe("user");
+    const openingBlock = msgs[0]?.content[0];
+    expect(openingBlock?.type === "text" && openingBlock.text).toBe("Hello");
+
+    expect(msgs[1]?.role).toBe("assistant");
+    expect(msgs[2]?.role).toBe("user");
+    const turn0Result = msgs[2]?.content[0];
+    expect(turn0Result?.type).toBe("tool_result");
+    if (turn0Result?.type === "tool_result") {
+      expect(turn0Result.toolUseId as string).toBe(U1);
+      expect(turn0Result.content).toBe("reply to u1");
+    }
+
+    expect(msgs[3]?.role).toBe("assistant");
+    expect(msgs[4]?.role).toBe("user");
+    const turn1Result = msgs[4]?.content[0];
+    expect(turn1Result?.type).toBe("tool_result");
+    if (turn1Result?.type === "tool_result") {
+      expect(turn1Result.toolUseId as string).toBe(U2);
+      expect(turn1Result.content).toBe("<dispatched>");
+    }
+
+    expect(msgs[5]?.role).toBe("assistant");
+    expect(msgs[6]?.role).toBe("user");
+    const turn2Result = msgs[6]?.content[0];
+    expect(turn2Result?.type).toBe("tool_result");
+    if (turn2Result?.type === "tool_result") {
+      expect(turn2Result.toolUseId as string).toBe(U3);
+      expect(turn2Result.content).toBe("reply to u3");
+    }
+
+    expect(result.value.startTurnIndex).toBe(3);
+  });
+
+  test("fresh inbound between turns: appears as plain text in correct position", async () => {
+    const U1 = "toolu_ask_u1";
+
+    const turn0: unknown = {
+      turn_index: 0,
+      started_at: new Date(10_000),
+      completed_at: new Date(11_000),
+      response: {
+        content: [{ type: "tool_use", id: U1, name: "ask", input: {} }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+      tool_results: [],
+    };
+    // Turn 1: a text turn (no asks), completed normally.
+    const turn1: unknown = {
+      turn_index: 1,
+      started_at: new Date(18_000),
+      completed_at: new Date(19_000),
+      response: {
+        content: [{ type: "text", text: "OK noted" }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+      tool_results: [],
+    };
+
+    // R1 pairs with turn 0's ask (u1)
+    const inboundR1 = inboundRow("reply to u1", new Date(15_000), U1);
+    // R2 is a fresh nudge that arrived between turn 0 and turn 1 (no source_tool_use_id)
+    const inboundR2 = inboundRow("fresh nudge", new Date(16_000), null);
+    // The current inbound (triggers this resume) arrived after turn 1
+    const inboundCurrent = inboundRow("trigger me", new Date(22_000), null);
+
+    const sql = makeSql(
+      { rows: [sessRow()] },
+      { rows: [turn0, turn1] },
+      { rows: [inboundR1, inboundR2, inboundCurrent] },
     );
 
     const result = await loadResumeInput(sql, {
       sessionId: SESS_ID,
       tenantId: TENANT_ID,
       agentSystemPrompt: SYS_PROMPT,
-      inboundContent: "fresh message",
+      inboundContent: "trigger me",
       inboundMessageId: INBOUND_ID,
       sourceToolUseId: null,
     });
+
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
-    // sourceToolUseId is null → falls back to plain-text wrapping (existing behavior)
     const msgs = result.value.initialMessages;
-    const last = msgs[msgs.length - 1];
-    expect(last?.role).toBe("user");
-    const block = last?.content[0];
-    expect(block?.type).toBe("text");
-    if (block?.type !== "text") return;
-    expect(block.text).toBe("fresh message");
+    // [0] user: opening "Hello"
+    // [1] assistant: turn 0 (ask u1)
+    // [2] user: tool_result(u1, "reply to u1")
+    // [3] user: plain "fresh nudge" (unpaired, between turn 0 and turn 1)
+    // [4] assistant: turn 1 ("OK noted")
+    // [5] user: plain "trigger me" (current inbound, after turn 1)
+    expect(msgs).toHaveLength(6);
+
+    expect(msgs[0]?.role).toBe("user");
+    expect(msgs[1]?.role).toBe("assistant");
+
+    const tr = msgs[2]?.content[0];
+    expect(tr?.type).toBe("tool_result");
+    if (tr?.type === "tool_result") expect(tr.content).toBe("reply to u1");
+
+    const nudge = msgs[3]?.content[0];
+    expect(nudge?.type === "text" && nudge.text).toBe("fresh nudge");
+
+    expect(msgs[4]?.role).toBe("assistant");
+
+    const trigger = msgs[5]?.content[0];
+    expect(trigger?.type === "text" && trigger.text).toBe("trigger me");
+  });
+});
+
+describe("loadResumeInput — RELAY-232 guard assertions", () => {
+  test("inbound count exceeds cap: throws AssertionError", () => {
+    const lastIndex = MAX_INBOUNDS_REPLAYED_PER_RESUME;
+    const overCap = Array.from({ length: lastIndex + 1 }, (_, i) =>
+      inboundRow(`msg${String(i)}`, new Date(i * 1_000), null),
+    );
+    // Use the last inbound's content as the current one so the sanity check passes.
+    // (In practice the cap assertion fires before we reach that check.)
+    const sql = makeSql({ rows: [sessRow()] }, { rows: [] }, { rows: overCap });
+    expect(
+      loadResumeInput(sql, {
+        sessionId: SESS_ID,
+        tenantId: TENANT_ID,
+        agentSystemPrompt: SYS_PROMPT,
+        inboundContent: `msg${String(lastIndex)}`,
+        inboundMessageId: INBOUND_ID,
+        sourceToolUseId: null,
+      }),
+    ).rejects.toThrow(AssertionError);
+  });
+
+  test("clock skew — turn started_at < previous completed_at: throws AssertionError", () => {
+    const skewedTurn1: unknown = {
+      turn_index: 1,
+      started_at: new Date(1_500), // < turn 0 completed_at (T2 = 2000)
+      completed_at: new Date(3_000),
+      response: {
+        content: [{ type: "text", text: "skewed" }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+      tool_results: [],
+    };
+    const sql = makeSql(
+      { rows: [sessRow()] },
+      { rows: [turnRow(0, "t0"), skewedTurn1] },
+      { rows: [inboundRow("Hi")] },
+    );
+    expect(
+      loadResumeInput(sql, {
+        sessionId: SESS_ID,
+        tenantId: TENANT_ID,
+        agentSystemPrompt: SYS_PROMPT,
+        inboundContent: "Hi",
+        inboundMessageId: INBOUND_ID,
+        sourceToolUseId: null,
+      }),
+    ).rejects.toThrow(AssertionError);
+  });
+
+  test("current inbound content mismatch: throws AssertionError", () => {
+    // The inbound row stored in DB has different content than params.inboundContent.
+    const sql = makeSql(
+      { rows: [sessRow()] },
+      { rows: [] },
+      { rows: [inboundRow("actual DB content")] },
+    );
+    expect(
+      loadResumeInput(sql, {
+        sessionId: SESS_ID,
+        tenantId: TENANT_ID,
+        agentSystemPrompt: SYS_PROMPT,
+        inboundContent: "caller claims this content",
+        inboundMessageId: INBOUND_ID,
+        sourceToolUseId: null,
+      }),
+    ).rejects.toThrow(AssertionError);
   });
 });
