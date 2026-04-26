@@ -4,6 +4,7 @@
 import { assert } from "../core/assert.ts";
 import type { ToolSchema } from "./model.ts";
 import type { ToolInvocationContext, ToolRegistry, ToolResult } from "./tools.ts";
+import { notifyToolSchema } from "./builtin-tools.ts";
 
 export type ToolDefinition = {
   readonly schema: ToolSchema;
@@ -42,6 +43,19 @@ export class InMemoryToolRegistry implements ToolRegistry {
     return def.invoke(params.input, params.ctx, params.signal);
   }
 }
+
+// notify is special-cased in dispatchTurn before tools.invoke is ever reached.
+// This registration surfaces the schema to tools.list() and acts as a programmer-error
+// trap: if invoke is ever reached, dispatchTurn failed to intercept the block.
+export const notifyTool: ToolDefinition = {
+  schema: notifyToolSchema,
+  invoke: () => {
+    assert(
+      false,
+      "notifyTool.invoke: must not be reached — dispatchTurn special-cases notify before invoke",
+    );
+  },
+};
 
 // Built-in echo tool for tests and local development.
 export const echoTool: ToolDefinition = {

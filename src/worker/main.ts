@@ -13,7 +13,7 @@ import { triggerHandlers } from "../trigger/handlers.ts";
 import { OpenAIEmbeddingClient } from "../memory/embedding-openai.ts";
 import { AnthropicModelClient } from "../session/model-anthropic.ts";
 import { makeRememberTool } from "../memory/remember.ts";
-import { InMemoryToolRegistry, echoTool } from "../session/tools-inmemory.ts";
+import { InMemoryToolRegistry, echoTool, notifyTool } from "../session/tools-inmemory.ts";
 import { MAX_WORKER_ID_LEN } from "../work_queue/limits.ts";
 import { registerQueueGauges } from "../work_queue/observability.ts";
 import { WorkerId } from "../work_queue/queue.ts";
@@ -46,7 +46,11 @@ const model = new AnthropicModelClient({ apiKey: ANTHROPIC_API_KEY });
 const embedder = new OpenAIEmbeddingClient({ apiKey: OPENAI_API_KEY });
 
 const sql = connect({ url: DATABASE_URL, applicationName: "relay-worker" });
-const tools = new InMemoryToolRegistry([echoTool, makeRememberTool({ sql, embedding: embedder })]);
+const tools = new InMemoryToolRegistry([
+  echoTool,
+  makeRememberTool({ sql, embedding: embedder }),
+  notifyTool,
+]);
 const queue = makeWorkerQueue(sql);
 const disposeGauges = registerQueueGauges(sql, realClock);
 
